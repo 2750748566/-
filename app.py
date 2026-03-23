@@ -1,4 +1,3 @@
-
 import streamlit as st
 import time
 import threading
@@ -75,22 +74,23 @@ while True:
         else:
             st.success("✅ 连接正常")
 
-    # 绘制心跳包数曲线图（横轴为本地时间）
+    # 绘制心跳包数曲线图（横轴为本地时间，精确到秒）
     with history_lock:
         if history:
             # 将历史数据转换为 DataFrame
             df = pd.DataFrame(history, columns=['timestamp', 'seq'])
-            # 将时间戳转换为本地时间字符串（格式 HH:MM）
-            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M')
+            # 将时间戳转换为本地时间字符串（格式 HH:MM:SS）
+            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
             
             # 使用 matplotlib 绘制折线图
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
-            ax.set_xlabel('时间')
+            ax.set_xlabel('时间 (时:分:秒)')
             ax.set_ylabel('心跳包序号')
             ax.set_title('心跳包数量变化趋势')
-            # 旋转横轴标签，避免重叠
-            plt.xticks(rotation=45)
+            # 自动调整横轴标签，避免重叠
+            plt.xticks(rotation=45, ha='right')
+            # 如果数据点过多，可自动选择部分标签显示（这里保留全部，但旋转45度）
             plt.tight_layout()
             chart_placeholder.pyplot(fig)
             plt.close(fig)
