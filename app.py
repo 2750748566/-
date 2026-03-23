@@ -1,12 +1,13 @@
+
 import streamlit as st
 import time
 import threading
 import pandas as pd
 from collections import deque
 import datetime
+import matplotlib.pyplot as plt
 
 # 用于存储心跳历史的全局数据结构
-# 使用 deque 限制最大长度，避免内存无限增长
 history = deque(maxlen=200)
 history_lock = threading.Lock()
 
@@ -42,7 +43,7 @@ if 'initialized' not in st.session_state:
 st.title("🚁 无人机心跳监控")
 st.markdown("模拟无人机心跳自收自发，每秒发送一次，3秒未收到则报警")
 
-# 实时显示当前系统时间（同步本地时间）
+# 实时显示当前系统时间
 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.sidebar.metric("🕒 本地系统时间", current_time)
 
@@ -55,6 +56,7 @@ while True:
     now = time.time()
     last = st.session_state['last_received']
     delta = now - last
+    delta_int = int(round(delta))  # 取整数
 
     # 检查超时
     if delta > 3 and not st.session_state['timeout_flag']:
@@ -66,24 +68,32 @@ while True:
         with col1:
             st.metric("最新心跳", st.session_state['last_heartbeat_info'])
         with col2:
-            st.metric("距上次心跳", f"{delta:.2f} 秒")
+            st.metric("距上次心跳", f"{delta_int} 秒")  # 显示整数秒
 
         if st.session_state['timeout_flag']:
             st.error("⚠️ 连接超时！超过 3 秒未收到心跳。")
         else:
             st.success("✅ 连接正常")
 
-    # 更新心跳包数曲线图
+    # 绘制心跳包数曲线图（横轴为本地时间）
     with history_lock:
         if history:
             # 将历史数据转换为 DataFrame
             df = pd.DataFrame(history, columns=['timestamp', 'seq'])
-            # 将时间戳转换为可读的时间字符串（用于横轴标签）
-            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
-            # 使用 timestamp 作为 x 轴数值，streamlit 会自动格式化
-            df.set_index('timestamp', inplace=True)
-            # 绘制折线图
-            chart_placeholder.line_chart(df['seq'])
+            # 将时间戳转换为本地时间字符串（格式 HH:MM）
+            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M')
+            
+            # 使用 matplotlib 绘制折线图
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
+            ax.set_xlabel('时间')
+            ax.set_ylabel('心跳包序号')
+            ax.set_title('心跳包数量变化趋势')
+            # 旋转横轴标签，避免重叠
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            chart_placeholder.pyplot(fig)
+            plt.close(fig)
         else:
             chart_placeholder.info("等待心跳数据...")
 
