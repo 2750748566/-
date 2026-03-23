@@ -1,6 +1,14 @@
 import streamlit as st
 import time
 import threading
+import pandas as pd
+from collections import deque
+import datetime
+
+# 用于存储心跳历史的全局数据结构
+# 使用 deque 限制最大长度，避免内存无限增长
+history = deque(maxlen=200)
+history_lock = threading.Lock()
 
 def heartbeat_sender():
     """后台线程：每秒发送一次心跳（模拟自收自发）"""
@@ -9,11 +17,15 @@ def heartbeat_sender():
         time.sleep(1)
         seq += 1
         now = time.time()
-        # 更新 session_state 中的心跳信息
+        # 更新 session_state 中的实时信息
         st.session_state['last_received'] = now
         st.session_state['current_seq'] = seq
-        st.session_state['last_heartbeat_info'] = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        st.session_state['last_heartbeat_info'] = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
         st.session_state['timeout_flag'] = False  # 收到心跳，重置超时标志
+        
+        # 将心跳记录加入历史（线程安全）
+        with history_lock:
+            history.append((now, seq))
 
 # 初始化 session_state
 if 'initialized' not in st.session_state:
@@ -30,19 +42,25 @@ if 'initialized' not in st.session_state:
 st.title("🚁 无人机心跳监控")
 st.markdown("模拟无人机心跳自收自发，每秒发送一次，3秒未收到则报警")
 
+# 实时显示当前系统时间（同步本地时间）
+current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+st.sidebar.metric("🕒 本地系统时间", current_time)
+
 # 实时显示区域
 placeholder = st.empty()
+chart_placeholder = st.empty()  # 用于放置图表的占位符
 
-# 主循环：每秒刷新页面，检查超时
+# 主循环：每秒刷新页面，检查超时并更新图表
 while True:
     now = time.time()
     last = st.session_state['last_received']
     delta = now - last
 
-    # 检查超时（仅当未超时时触发）
+    # 检查超时
     if delta > 3 and not st.session_state['timeout_flag']:
         st.session_state['timeout_flag'] = True
 
+    # 更新顶部实时指标区域
     with placeholder.container():
         col1, col2 = st.columns(2)
         with col1:
@@ -55,4 +73,18 @@ while True:
         else:
             st.success("✅ 连接正常")
 
-    time.sleep(1)   # 每秒刷新一次
+    # 更新心跳包数曲线图
+    with history_lock:
+        if history:
+            # 将历史数据转换为 DataFrame
+            df = pd.DataFrame(history, columns=['timestamp', 'seq'])
+            # 将时间戳转换为可读的时间字符串（用于横轴标签）
+            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
+            # 使用 timestamp 作为 x 轴数值，streamlit 会自动格式化
+            df.set_index('timestamp', inplace=True)
+            # 绘制折线图
+            chart_placeholder.line_chart(df['seq'])
+        else:
+            chart_placeholder.info("等待心跳数据...")
+
+    time.sleep(1)  # 每秒刷新一次
