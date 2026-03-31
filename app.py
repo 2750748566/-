@@ -4,102 +4,117 @@ import threading
 import pandas as pd
 import numpy as np
 from collections import deque
-import datetime
 import matplotlib.pyplot as plt
-import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
 from geopy.distance import distance
 
-# ----------------------------- 南京科技职业学院内部矩形路径点（四个角）-----------------------------
-# 定义矩形四个顶点（大致构成矩形，顺序为顺时针）
-CAMPUS_POINTS = [
-    (32.2322, 118.7858, "校门"),          # 西南角
-    (32.2330, 118.7862, "教学楼A"),        # 东南角
-    (32.2335, 118.7855, "图书馆"),         # 东北角
-    (32.2327, 118.7848, "食堂"),           # 西北角
+# ----------------------------- 初始默认路径（南京科技职业学院矩形）-----------------------------
+DEFAULT_POINTS = [
+    {"lat": 32.2322, "lon": 118.7858, "name": "校门"},
+    {"lat": 32.2330, "lon": 118.7862, "name": "教学楼A"},
+    {"lat": 32.2335, "lon": 118.7855, "name": "图书馆"},
+    {"lat": 32.2327, "lon": 118.7848, "name": "食堂"},
 ]
-# 为了形成闭合矩形，路径需要按顺序连接四个点，然后回到起点（循环）
-ROUTE_LAT = [p[0] for p in CAMPUS_POINTS]
-ROUTE_LON = [p[1] for p in CAMPUS_POINTS]
-ROUTE_NAMES = [p[2] for p in CAMPUS_POINTS]
 
-# ----------------------------- 全局数据结构 -----------------------------
+# ----------------------------- 初始化 session_state -----------------------------
+if "points" not in st.session_state:
+    st.session_state.points = DEFAULT_POINTS.copy()
+if "initialized" not in st.session_state:
+    st.session_state.last_received = time.time()
+    st.session_state.current_seq = 0
+    st.session_state.last_heartbeat_info = "等待心跳..."
+    st.session_state.timeout_flag = False
+    st.session_state.initialized = True
+
+# 数据缓存
 history = deque(maxlen=200)
 positions = deque(maxlen=100)
 history_lock = threading.Lock()
 positions_lock = threading.Lock()
 
+# 后台心跳线程（读取 session_state 中的路径点）
 def heartbeat_sender():
-    """后台线程：每秒发送一次心跳，并按矩形路径移动"""
     seq = 0
-    current_segment = 0
-    steps_per_segment = 8   # 每个线段分成8步，使运动平滑
-    step_in_segment = 0
-
     while True:
         time.sleep(1)
         seq += 1
         now = time.time()
-
-        # 根据当前路段和步数计算位置
-        if current_segment < len(ROUTE_LAT):
-            start_lat, start_lon = ROUTE_LAT[current_segment], ROUTE_LON[current_segment]
-            # 下一个点：如果是最后一个点则回到第一个点，形成闭环
-            next_idx = (current_segment + 1) % len(ROUTE_LAT)
-            end_lat, end_lon = ROUTE_LAT[next_idx], ROUTE_LON[next_idx]
-            t = step_in_segment / steps_per_segment
-            lat = start_lat + (end_lat - start_lat) * t
-            lon = start_lon + (end_lon - start_lon) * t
-            step_in_segment += 1
-            if step_in_segment >= steps_per_segment:
-                step_in_segment = 0
-                current_segment = next_idx  # 移到下一段
+        points = st.session_state.points
+        if len(points) < 2:
+            lat, lon = points[0]["lat"], points[0]["lon"] if points else (32.2322, 118.7858)
         else:
-            # 安全起见，重置
-            current_segment = 0
-            step_in_segment = 0
-            lat, lon = ROUTE_LAT[0], ROUTE_LON[0]
+            total_segments = len(points)
+            steps_per_segment = 8
+            total_steps = total_segments * steps_per_segment
+            step = (seq - 1) % total_steps
+            segment = step // steps_per_segment
+            step_in_segment = step % steps_per_segment
+            start = points[segment]
+            end = points[(segment + 1) % total_segments]
+            t = step_in_segment / steps_per_segment
+            lat = start["lat"] + (end["lat"] - start["lat"]) * t
+            lon = start["lon"] + (end["lon"] - start["lon"]) * t
+        altitude = seq * 2  # 仅用于记录，不在地图上显示
 
-        altitude = seq * 2  # 海拔（米），此处保留但不用于柱状图，仅用于数据记录
-
-        st.session_state['last_received'] = now
-        st.session_state['current_seq'] = seq
-        st.session_state['last_heartbeat_info'] = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
-        st.session_state['timeout_flag'] = False
+        st.session_state.last_received = now
+        st.session_state.current_seq = seq
+        st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
+        st.session_state.timeout_flag = False
 
         with history_lock:
             history.append((now, seq))
         with positions_lock:
             positions.append((lat, lon, altitude, seq))
 
-# ----------------------------- 初始化 -----------------------------
-if 'initialized' not in st.session_state:
-    st.session_state['last_received'] = time.time()
-    st.session_state['current_seq'] = 0
-    st.session_state['last_heartbeat_info'] = "等待心跳..."
-    st.session_state['timeout_flag'] = False
-    st.session_state['initialized'] = True
+# 启动后台线程（只启动一次）
+if "thread_started" not in st.session_state:
     thread = threading.Thread(target=heartbeat_sender, daemon=True)
     thread.start()
+    st.session_state.thread_started = True
 
-# 页面布局
-st.title("🚁 无人机心跳监控 + 矩形路径规划 + 3D 地图")
-st.markdown("模拟无人机按照矩形路径飞行，地图上显示路径、地名和实时位置，3秒未收到心跳报警。")
+# ----------------------------- 页面布局 -----------------------------
+st.title("🚁 无人机心跳监控 + 高德地图动态航线")
+st.markdown("在侧边栏编辑路径点，无人机按顺序循环飞行。地图使用高德底图，显示路径、地名和实时位置。")
 
-# 侧边栏：Mapbox Token 输入
-mapbox_token = st.sidebar.text_input(
-    "Mapbox Token（可选）",
-    value="pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4M29iazA2Z2gycXA4N2pmbDZmangifQ.-g_vE53SD2WrJ6t-r0D0FQ"
-)
-if mapbox_token:
-    pdk.settings.mapbox_key = mapbox_token
+# 侧边栏：路径点编辑器
+st.sidebar.subheader("🗺️ 编辑飞行路径")
+with st.sidebar.form("edit_points"):
+    edited_points = []
+    for i, p in enumerate(st.session_state.points):
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+        with col1:
+            name = st.text_input("地名", value=p["name"], key=f"name_{i}")
+        with col2:
+            lat = st.number_input("纬度", value=p["lat"], format="%.6f", key=f"lat_{i}")
+        with col3:
+            lon = st.number_input("经度", value=p["lon"], format="%.6f", key=f"lon_{i}")
+        with col4:
+            delete = st.checkbox("删除", key=f"del_{i}")
+        if not delete:
+            edited_points.append({"name": name, "lat": lat, "lon": lon})
+    # 添加新点
+    col1, col2 = st.columns(2)
+    with col1:
+        new_name = st.text_input("新增地名", placeholder="新点名称", key="new_name")
+    with col2:
+        new_lat = st.number_input("新增纬度", value=32.2325, format="%.6f", key="new_lat")
+        new_lon = st.number_input("新增经度", value=118.7855, format="%.6f", key="new_lon")
+    if st.form_submit_button("保存航线"):
+        if new_name.strip():
+            edited_points.append({"name": new_name, "lat": new_lat, "lon": new_lon})
+        if len(edited_points) >= 2:
+            st.session_state.points = edited_points
+            st.success("航线已更新！")
+        else:
+            st.error("至少需要两个点才能构成路径。")
 
-# 侧边栏：矩形路径点展示
-st.sidebar.subheader("🗺️ 矩形路径点（顺时针）")
-for idx, name in enumerate(ROUTE_NAMES, 1):
-    st.sidebar.write(f"{idx}. {name}")
-st.sidebar.caption("无人机将沿矩形顺时针循环飞行")
+# 显示当前路径顺序
+st.sidebar.subheader("📌 当前航线顺序")
+for idx, p in enumerate(st.session_state.points):
+    st.sidebar.write(f"{idx+1}. {p['name']} ({p['lat']:.6f}, {p['lon']:.6f})")
 
-# 实时显示区域
+# 实时显示区
 placeholder = st.empty()
 chart_placeholder = st.empty()
 map_placeholder = st.empty()
@@ -107,25 +122,25 @@ map_placeholder = st.empty()
 # ----------------------------- 主循环（每秒刷新） -----------------------------
 while True:
     now = time.time()
-    last = st.session_state['last_received']
+    last = st.session_state.last_received
     delta = now - last
     delta_int = int(round(delta))
 
-    if delta > 3 and not st.session_state['timeout_flag']:
-        st.session_state['timeout_flag'] = True
+    if delta > 3 and not st.session_state.timeout_flag:
+        st.session_state.timeout_flag = True
 
     with placeholder.container():
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("最新心跳", st.session_state['last_heartbeat_info'])
+            st.metric("最新心跳", st.session_state.last_heartbeat_info)
         with col2:
             st.metric("距上次心跳", f"{delta_int} 秒")
-        if st.session_state['timeout_flag']:
+        if st.session_state.timeout_flag:
             st.error("⚠️ 连接超时！超过 3 秒未收到心跳。")
         else:
             st.success("✅ 连接正常")
 
-    # 心跳折线图（不变）
+    # 心跳折线图
     with history_lock:
         if history:
             df = pd.DataFrame(history, columns=['timestamp', 'seq'])
@@ -142,96 +157,48 @@ while True:
         else:
             chart_placeholder.info("等待心跳数据...")
 
-    # 3D 地图（无柱状图，只有路径、地名和当前位置点）
+    # 高德地图（通过 folium）
     with positions_lock:
         if positions:
             pos_df = pd.DataFrame(positions, columns=['lat', 'lon', 'altitude', 'seq'])
-
-            # 图层列表
-            layers = []
-
-            # 1. 规划路线（矩形路径，青色）
-            planned_path_coords = []
-            for i in range(len(ROUTE_LAT)):
-                planned_path_coords.append([ROUTE_LON[i], ROUTE_LAT[i]])
-            # 闭合矩形：添加第一个点到末尾形成闭合
-            planned_path_coords.append([ROUTE_LON[0], ROUTE_LAT[0]])
-            planned_path_layer = pdk.Layer(
-                "PathLayer",
-                data=[{"path": planned_path_coords}],
-                get_path="path",
-                get_width=3,
-                get_color=[0, 255, 255],  # 青色
-                width_scale=1,
-                opacity=0.8,
-            )
-            layers.append(planned_path_layer)
-
-            # 2. 无人机轨迹（实际飞过的路径，黄色）
-            if len(pos_df) > 1:
-                path_coords = pos_df[['lon', 'lat']].values.tolist()
-                path_layer = pdk.Layer(
-                    "PathLayer",
-                    data=[{"path": path_coords}],
-                    get_path="path",
-                    get_width=2,
-                    get_color=[255, 255, 0],  # 黄色
-                    width_scale=1,
-                )
-                layers.append(path_layer)
-
-            # 3. 地名标签（每个矩形顶点）
-            text_data = pd.DataFrame({
-                "lat": ROUTE_LAT,
-                "lon": ROUTE_LON,
-                "name": ROUTE_NAMES
-            })
-            text_layer = pdk.Layer(
-                "TextLayer",
-                data=text_data,
-                get_position=["lon", "lat"],
-                get_text="name",
-                get_size=16,
-                get_color=[255, 255, 255, 255],  # 白色文字
-                get_angle=0,
-                get_text_anchor="middle",
-                get_alignment_baseline="center",
-                pickable=False,
-                font_family="Arial",
-                billboard=True,
-            )
-            layers.append(text_layer)
-
-            # 4. 无人机当前位置点（红色圆点，大小为15像素）
             current_pos = pos_df.iloc[-1]
-            current_point_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=pd.DataFrame({
-                    "lat": [current_pos['lat']],
-                    "lon": [current_pos['lon']]
-                }),
-                get_position=["lon", "lat"],
-                get_radius=5,            # 半径5米
-                get_fill_color=[255, 0, 0, 255],  # 红色
-                pickable=True,
-            )
-            layers.append(current_point_layer)
-
-            # 视图状态：跟随最新位置，zoom=18 放大比例尺
-            view_state = pdk.ViewState(
-                latitude=current_pos['lat'],
-                longitude=current_pos['lon'],
-                zoom=18,
-                pitch=50,
-                bearing=0,
-            )
-
-            deck = pdk.Deck(
-                layers=layers,
-                initial_view_state=view_state,
-                tooltip={"text": "序号: {seq}\n海拔: {altitude} m"}
-            )
-            map_placeholder.pydeck_chart(deck, use_container_width=True)
+            # 创建地图，初始中心为当前位置
+            # 高德瓦片 URL (普通街道图)
+            tile_url = "http://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+            m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles=tile_url, attr="高德地图")
+            
+            # 1. 绘制规划路径（青色闭合线）
+            points_coords = [[p["lat"], p["lon"]] for p in st.session_state.points]
+            # 闭合路径
+            closed_coords = points_coords + [points_coords[0]]
+            folium.PolyLine(closed_coords, color="cyan", weight=3, opacity=0.8).add_to(m)
+            
+            # 2. 无人机实际轨迹（黄色线）
+            if len(pos_df) > 1:
+                track_coords = pos_df[['lat', 'lon']].values.tolist()
+                folium.PolyLine(track_coords, color="yellow", weight=2).add_to(m)
+            
+            # 3. 路径点标注（带 Popup）
+            for p in st.session_state.points:
+                folium.Marker(
+                    location=[p["lat"], p["lon"]],
+                    popup=folium.Popup(p["name"], max_width=200),
+                    icon=folium.Icon(color="blue", icon="info-sign")
+                ).add_to(m)
+            
+            # 4. 无人机当前位置（红色圆点）
+            folium.CircleMarker(
+                location=[current_pos['lat'], current_pos['lon']],
+                radius=8,
+                color="red",
+                fill=True,
+                fill_color="red",
+                fill_opacity=0.8,
+                popup=f"心跳序号: {current_pos['seq']}<br>海拔: {current_pos['altitude']} m"
+            ).add_to(m)
+            
+            # 显示地图
+            st_folium(m, width=800, height=500, key="map")
         else:
             map_placeholder.info("等待位置数据...")
 
