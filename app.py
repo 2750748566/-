@@ -9,20 +9,19 @@ import matplotlib.pyplot as plt
 import pydeck as pdk
 from geopy.distance import distance
 
-# ----------------------------- 南京科技职业学院内部关键点（粗略坐标）-----------------------------
-# 坐标来源：通过高德/百度地图粗略获取，实际使用前请校正
-# 假设校园范围约500米
+# ----------------------------- 南京科技职业学院内部关键点（含地名）-----------------------------
 CAMPUS_POINTS = [
-    (32.2322, 118.7858, "校门"),          # 校门（原有中心点）
+    (32.2322, 118.7858, "校门"),
     (32.2328, 118.7865, "教学楼A"),
     (32.2335, 118.7850, "图书馆"),
     (32.2329, 118.7842, "食堂"),
     (32.2320, 118.7845, "实验楼"),
     (32.2315, 118.7858, "体育馆"),
 ]
-# 提取经纬度列表
+# 提取经纬度和地名
 ROUTE_LAT = [p[0] for p in CAMPUS_POINTS]
 ROUTE_LON = [p[1] for p in CAMPUS_POINTS]
+ROUTE_NAMES = [p[2] for p in CAMPUS_POINTS]
 
 # ----------------------------- 全局数据结构 -----------------------------
 history = deque(maxlen=200)
@@ -33,9 +32,7 @@ positions_lock = threading.Lock()
 def heartbeat_sender():
     """后台线程：每秒发送一次心跳，并按预定义路线移动"""
     seq = 0
-    # 当前所在路段的索引（0 到 len(ROUTE)-2）
     current_segment = 0
-    # 每个路段总步数（为了让运动更平滑，可以增加插值，这里简单起见每个路段停留5秒）
     steps_per_segment = 5
     step_in_segment = 0
 
@@ -56,20 +53,19 @@ def heartbeat_sender():
                 step_in_segment = 0
                 current_segment += 1
                 if current_segment >= len(ROUTE_LAT) - 1:
-                    # 到达终点，可选择折返或循环，这里选择折返（倒序）
+                    # 到达终点，折返
                     ROUTE_LAT.reverse()
                     ROUTE_LON.reverse()
+                    ROUTE_NAMES.reverse()
                     current_segment = 0
                     step_in_segment = 0
         else:
-            # 安全起见，重置
             current_segment = 0
             step_in_segment = 0
             lat, lon = ROUTE_LAT[0], ROUTE_LON[0]
 
-        altitude = seq * 2  # 海拔（米）用心跳序号线性放大
+        altitude = seq * 2  # 海拔（米）
 
-        # 更新 session_state
         st.session_state['last_received'] = now
         st.session_state['current_seq'] = seq
         st.session_state['last_heartbeat_info'] = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
@@ -87,14 +83,13 @@ if 'initialized' not in st.session_state:
     st.session_state['last_heartbeat_info'] = "等待心跳..."
     st.session_state['timeout_flag'] = False
     st.session_state['initialized'] = True
-    st.session_state['obstacles'] = []   # 障碍物列表
-    # 启动后台心跳线程
+    st.session_state['obstacles'] = []
     thread = threading.Thread(target=heartbeat_sender, daemon=True)
     thread.start()
 
 # 页面布局
 st.title("🚁 无人机心跳监控 + 校园内部路线规划 + 3D 地图")
-st.markdown("模拟无人机按照南京科技职业学院内部预设路线飞行，3秒未收到心跳报警；地图上柱状高度代表心跳序号，红色柱体为障碍物，黄色线为规划路线。")
+st.markdown("模拟无人机按照南京科技职业学院内部预设路线飞行，3秒未收到心跳报警；地图上柱状高度代表心跳序号，红色柱体为障碍物，青色线为规划路线，文字为地名。")
 
 # 侧边栏：Mapbox Token 输入
 mapbox_token = st.sidebar.text_input(
@@ -104,7 +99,7 @@ mapbox_token = st.sidebar.text_input(
 if mapbox_token:
     pdk.settings.mapbox_key = mapbox_token
 
-# 侧边栏：障碍物管理（与之前相同，略）
+# 侧边栏：障碍物管理
 st.sidebar.subheader("🗻 障碍物管理")
 col1, col2 = st.sidebar.columns(2)
 with col1:
@@ -124,6 +119,12 @@ if st.session_state['obstacles']:
 else:
     st.sidebar.info("暂无障碍物，请添加。")
 
+# 侧边栏：航线展示
+st.sidebar.subheader("✈️ 规划航线顺序")
+for idx, name in enumerate(ROUTE_NAMES, 1):
+    st.sidebar.write(f"{idx}. {name}")
+st.sidebar.caption("无人机将按此顺序往返飞行")
+
 # 实时显示区域
 placeholder = st.empty()
 chart_placeholder = st.empty()
@@ -140,7 +141,6 @@ while True:
     if delta > 3 and not st.session_state['timeout_flag']:
         st.session_state['timeout_flag'] = True
 
-    # 实时指标
     with placeholder.container():
         col1, col2 = st.columns(2)
         with col1:
@@ -152,7 +152,7 @@ while True:
         else:
             st.success("✅ 连接正常")
 
-    # 心跳折线图（同前）
+    # 心跳折线图
     with history_lock:
         if history:
             df = pd.DataFrame(history, columns=['timestamp', 'seq'])
@@ -169,7 +169,7 @@ while True:
         else:
             chart_placeholder.info("等待心跳数据...")
 
-    # 碰撞检测（同前）
+    # 碰撞检测
     warning_msg = None
     with positions_lock:
         if positions and st.session_state['obstacles']:
@@ -185,7 +185,7 @@ while True:
     else:
         warning_placeholder.empty()
 
-    # 3D 地图（含路线规划展示）
+    # 3D 地图
     with positions_lock:
         if positions:
             pos_df = pd.DataFrame(positions, columns=['lat', 'lon', 'altitude', 'seq'])
@@ -210,6 +210,7 @@ while True:
             )
 
             # 无人机轨迹线
+            layers = [column_layer]
             if len(pos_df) > 1:
                 path_coords = pos_df[['lon', 'lat']].values.tolist()
                 path_layer = pdk.Layer(
@@ -220,23 +221,42 @@ while True:
                     get_color=[255, 255, 0],
                     width_scale=1,
                 )
-                layers = [column_layer, path_layer]
-            else:
-                layers = [column_layer]
+                layers.append(path_layer)
 
-            # 添加预定义规划路线（用蓝色虚线表示，此处用实线）
-            # 将规划的路线点转成路径
+            # 规划路线（青色）
             planned_path_coords = list(zip(ROUTE_LON, ROUTE_LAT))
             planned_path_layer = pdk.Layer(
                 "PathLayer",
                 data=[{"path": planned_path_coords}],
                 get_path="path",
                 get_width=3,
-                get_color=[0, 255, 255],  # 青色
+                get_color=[0, 255, 255],
                 width_scale=1,
                 opacity=0.8,
             )
             layers.append(planned_path_layer)
+
+            # 地名标签层（TextLayer）
+            text_data = pd.DataFrame({
+                "lat": ROUTE_LAT,
+                "lon": ROUTE_LON,
+                "name": ROUTE_NAMES
+            })
+            text_layer = pdk.Layer(
+                "TextLayer",
+                data=text_data,
+                get_position=["lon", "lat"],
+                get_text="name",
+                get_size=12,
+                get_color=[0, 0, 0, 255],      # 黑色文字
+                get_angle=0,
+                get_text_anchor="middle",
+                get_alignment_baseline="center",
+                pickable=False,
+                font_family="Arial",
+                billboard=True,                 # 始终面向相机
+            )
+            layers.append(text_layer)
 
             # 障碍物图层
             if st.session_state['obstacles']:
@@ -255,12 +275,12 @@ while True:
                 )
                 layers.append(obstacle_layer)
 
-            # 视图状态：跟随最新位置，zoom 放大至 18 以显示校园细节
+            # 视图状态
             latest = pos_df.iloc[-1]
             view_state = pdk.ViewState(
                 latitude=latest['lat'],
                 longitude=latest['lon'],
-                zoom=18,          # 放大比例尺
+                zoom=18,
                 pitch=50,
                 bearing=0,
             )
