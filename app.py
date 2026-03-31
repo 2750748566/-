@@ -165,7 +165,7 @@ while True:
             # 创建地图，初始中心为当前位置
             # 高德瓦片 URL (普通街道图)
             tile_url = "http://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
-            m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles=tile_url, attr="高德地图")
+           m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="OpenStreetMap")
             
             # 1. 绘制规划路径（青色闭合线）
             points_coords = [[p["lat"], p["lon"]] for p in st.session_state.points]
