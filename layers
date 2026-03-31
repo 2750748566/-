@@ -1,0 +1,20 @@
+# 地名标签层（增强显示）
+text_data = pd.DataFrame({
+    "lat": ROUTE_LAT,
+    "lon": ROUTE_LON,
+    "name": ROUTE_NAMES
+})
+text_layer = pdk.Layer(
+    "TextLayer",
+    data=text_data,
+    get_position=["lon", "lat"],
+    get_text="name",
+    get_size=16,                         # 增大字号
+    get_color=[255, 255, 255, 255],      # 白色文字
+    get_angle=0,
+    get_text_anchor="middle",
+    get_alignment_baseline="center",
+    pickable=False,
+    font_family="Arial",
+    billboard=True,
+)
