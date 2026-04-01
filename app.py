@@ -19,6 +19,14 @@ DEFAULT_POINTS = [
 # ----------------------------- 初始化 session_state -----------------------------
 if "points" not in st.session_state:
     st.session_state.points = DEFAULT_POINTS.copy()
+if "history" not in st.session_state:
+    st.session_state.history = deque(maxlen=200)
+if "positions" not in st.session_state:
+    st.session_state.positions = deque(maxlen=100)
+if "history_lock" not in st.session_state:
+    st.session_state.history_lock = threading.Lock()
+if "positions_lock" not in st.session_state:
+    st.session_state.positions_lock = threading.Lock()
 if "initialized" not in st.session_state:
     st.session_state.last_received = time.time()
     st.session_state.current_seq = 0
@@ -26,84 +34,99 @@ if "initialized" not in st.session_state:
     st.session_state.timeout_flag = False
     st.session_state.initialized = True
 
-# 全局数据结构（线程安全）
-history = deque(maxlen=200)
-positions = deque(maxlen=100)
-history_lock = threading.Lock()
-positions_lock = threading.Lock()
+# 引用方便（避免每次都写 st.session_state.xxx）
+history = st.session_state.history
+positions = st.session_state.positions
+history_lock = st.session_state.history_lock
+positions_lock = st.session_state.positions_lock
 
 def heartbeat_sender():
-    """后台线程：每秒生成心跳和位置"""
     seq = 0
-    try:
-        while True:
-            time.sleep(1)
-            seq += 1
-            now = time.time()
+    while True:
+        time.sleep(1)
+        seq += 1
+        now = time.time()
+        points = st.session_state.get("points", DEFAULT_POINTS)
+        if len(points) < 2:
+            lat, lon = points[0]["lat"], points[0]["lon"] if points else (32.2322, 118.7858)
+        else:
+            total_segments = len(points)
+            steps_per_segment = 8
+            total_steps = total_segments * steps_per_segment
+            step = (seq - 1) % total_steps
+            segment = step // steps_per_segment
+            step_in_segment = step % steps_per_segment
+            start = points[segment]
+            end = points[(segment + 1) % total_segments]
+            t = step_in_segment / steps_per_segment
+            lat = start["lat"] + (end["lat"] - start["lat"]) * t
+            lon = start["lon"] + (end["lon"] - start["lon"]) * t
+        altitude = seq * 2
 
-            # 获取当前路径点（从 session_state 读取）
-            points = st.session_state.get("points", DEFAULT_POINTS)
+        st.session_state.last_received = now
+        st.session_state.current_seq = seq
+        st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
+        st.session_state.timeout_flag = False
 
-            # 根据路径点计算当前位置
-            if len(points) < 2:
-                lat, lon = points[0]["lat"], points[0]["lon"] if points else (32.2322, 118.7858)
-            else:
-                total_segments = len(points)
-                steps_per_segment = 8
-                total_steps = total_segments * steps_per_segment
-                step = (seq - 1) % total_steps
-                segment = step // steps_per_segment
-                step_in_segment = step % steps_per_segment
-                start = points[segment]
-                end = points[(segment + 1) % total_segments]
-                t = step_in_segment / steps_per_segment
-                lat = start["lat"] + (end["lat"] - start["lat"]) * t
-                lon = start["lon"] + (end["lon"] - start["lon"]) * t
-            altitude = seq * 2
+        with history_lock:
+            history.append((now, seq))
+        with positions_lock:
+            positions.append((lat, lon, altitude, seq))
 
-            # 更新 session_state 实时信息
-            st.session_state.last_received = now
-            st.session_state.current_seq = seq
-            st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
-            st.session_state.timeout_flag = False
+        if seq % 10 == 0:
+            print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(positions)}")
 
-            # 存储数据（加锁）
-            with history_lock:
-                history.append((now, seq))
-            with positions_lock:
-                positions.append((lat, lon, altitude, seq))
-
-            # 调试：每10秒打印一次队列长度（在终端查看）
-            if seq % 10 == 0:
-                print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(positions)}")
-
-    except Exception as e:
-        print(f"后台线程出错: {e}")
-
-# 启动后台线程（只启动一次）
 if "thread_started" not in st.session_state:
-    print("正在启动后台线程...")
     thread = threading.Thread(target=heartbeat_sender, daemon=True)
     thread.start()
     st.session_state.thread_started = True
-    print("后台线程已启动")
 
 # ----------------------------- 页面布局 -----------------------------
 st.title("🚁 无人机心跳监控 + 动态航线 (调试版)")
 st.markdown("侧边栏可编辑路径点，地图将显示无人机位置。下方显示调试信息。")
 
-# 侧边栏：路径编辑器（与原代码相同，略... 为了简洁，省略侧边栏代码，但实际运行时必须保留）
-# 此处我们只保留核心，但为避免代码过长，将完整版放在最后
+# 侧边栏：路径编辑器
+st.sidebar.subheader("🗺️ 编辑飞行路径")
+with st.sidebar.form("edit_points"):
+    edited_points = []
+    for i, p in enumerate(st.session_state.points):
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+        with col1:
+            name = st.text_input("地名", value=p["name"], key=f"name_{i}")
+        with col2:
+            lat = st.number_input("纬度", value=p["lat"], format="%.6f", key=f"lat_{i}")
+        with col3:
+            lon = st.number_input("经度", value=p["lon"], format="%.6f", key=f"lon_{i}")
+        with col4:
+            delete = st.checkbox("删除", key=f"del_{i}")
+        if not delete:
+            edited_points.append({"name": name, "lat": lat, "lon": lon})
+    col1, col2 = st.columns(2)
+    with col1:
+        new_name = st.text_input("新增地名", placeholder="新点名称", key="new_name")
+    with col2:
+        new_lat = st.number_input("新增纬度", value=32.2325, format="%.6f", key="new_lat")
+        new_lon = st.number_input("新增经度", value=118.7855, format="%.6f", key="new_lon")
+    if st.form_submit_button("保存航线"):
+        if new_name.strip():
+            edited_points.append({"name": new_name, "lat": new_lat, "lon": new_lon})
+        if len(edited_points) >= 2:
+            st.session_state.points = edited_points
+            st.success("航线已更新！")
+        else:
+            st.error("至少需要两个点才能构成路径。")
+
+st.sidebar.subheader("📌 当前航线顺序")
+for idx, p in enumerate(st.session_state.points):
+    st.sidebar.write(f"{idx+1}. {p['name']} ({p['lat']:.6f}, {p['lon']:.6f})")
 
 # 实时显示区
 placeholder = st.empty()
 chart_placeholder = st.empty()
 map_placeholder = st.empty()
-
-# 添加一个调试区域，显示 positions 队列长度
 debug_placeholder = st.empty()
 
-# ----------------------------- 实时更新部分（每次脚本执行时运行） -----------------------------
+# ----------------------------- 实时更新部分 -----------------------------
 now = time.time()
 last = st.session_state.last_received
 delta = now - last
@@ -124,12 +147,11 @@ with placeholder.container():
         st.success("✅ 连接正常")
 
 # 调试信息：显示 positions 长度
-with debug_placeholder.container():
-    with positions_lock:
-        pos_len = len(positions)
-    st.info(f"当前 positions 队列长度: {pos_len}")
+with positions_lock:
+    pos_len = len(positions)
+debug_placeholder.info(f"当前 positions 队列长度: {pos_len}")
 
-# 心跳折线图（与原代码相同）
+# 心跳折线图
 with history_lock:
     if history:
         df = pd.DataFrame(history, columns=['timestamp', 'seq'])
@@ -187,6 +209,6 @@ with positions_lock:
     else:
         map_placeholder.info("等待位置数据...")
 
-# 延迟1秒后重新运行脚本，实现“实时刷新”
+# 延迟后重新运行，实现自动刷新
 time.sleep(1)
 st.rerun()
