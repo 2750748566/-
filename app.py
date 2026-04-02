@@ -179,5 +179,5 @@ else:
     map_placeholder.info("等待位置数据...")
 
 # 延迟1秒后重新运行脚本，实现“实时刷新”
-time.sleep(1)
+time.sleep(3)
 st.rerun()
