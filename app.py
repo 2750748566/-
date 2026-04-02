@@ -27,13 +27,11 @@ if "initialized" not in st.session_state:
     st.session_state.timeout_flag = False
     st.session_state.initialized = True
 
-# 将数据队列也存入 session_state，避免每次 rerun 时重置
-if "history" not in st.session_state:
-    st.session_state.history = deque(maxlen=200)
-if "positions" not in st.session_state:
-    st.session_state.positions = deque(maxlen=100)
+# 改为模块级全局变量（避免线程访问 session_state 的问题）
+history = deque(maxlen=200)
+positions = deque(maxlen=100)
 
-# 线程锁（用于保护队列操作）
+# 线程锁
 history_lock = threading.Lock()
 positions_lock = threading.Lock()
 
@@ -46,7 +44,7 @@ def heartbeat_sender():
             seq += 1
             now = time.time()
 
-            # 获取当前路径点（从 session_state 读取）
+            # 获取当前路径点（从 session_state 读取，简单属性访问是安全的）
             points = st.session_state.get("points", DEFAULT_POINTS)
 
             # 根据路径点计算当前位置
@@ -66,21 +64,21 @@ def heartbeat_sender():
                 lon = start["lon"] + (end["lon"] - start["lon"]) * t
             altitude = seq * 2
 
-            # 更新 session_state 实时信息
+            # 更新 session_state 实时信息（简单赋值，通常安全）
             st.session_state.last_received = now
             st.session_state.current_seq = seq
             st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
             st.session_state.timeout_flag = False
 
-            # 存储数据到 session_state 中的队列（加锁）
+            # 存储数据到全局队列（加锁）
             with history_lock:
-                st.session_state.history.append((now, seq))
+                history.append((now, seq))
             with positions_lock:
-                st.session_state.positions.append((lat, lon, altitude, seq))
+                positions.append((lat, lon, altitude, seq))
 
             # 调试：每5秒打印一次队列长度
             if seq % 5 == 0:
-                print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(st.session_state.positions)}")
+                print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(positions)}")
 
     except Exception as e:
         print(f"后台线程出错: {e}")
@@ -165,15 +163,15 @@ with placeholder.container():
 # 调试信息：显示 positions 长度
 with debug_placeholder.container():
     with positions_lock:
-        pos_len = len(st.session_state.positions)
+        pos_len = len(positions)
     st.info(f"当前 positions 队列长度: {pos_len}")
     if pos_len == 0:
         st.warning("⚠️ 尚未收到任何位置数据，请检查后台线程是否运行。")
 
 # 心跳折线图
 with history_lock:
-    if st.session_state.history:
-        df = pd.DataFrame(st.session_state.history, columns=['timestamp', 'seq'])
+    if history:
+        df = pd.DataFrame(history, columns=['timestamp', 'seq'])
         df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
@@ -189,8 +187,8 @@ with history_lock:
 
 # 地图
 with positions_lock:
-    if st.session_state.positions:
-        pos_df = pd.DataFrame(st.session_state.positions, columns=['lat', 'lon', 'altitude', 'seq'])
+    if positions:
+        pos_df = pd.DataFrame(positions, columns=['lat', 'lon', 'altitude', 'seq'])
         current_pos = pos_df.iloc[-1]
         try:
             m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="OpenStreetMap")
