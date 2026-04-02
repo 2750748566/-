@@ -6,7 +6,32 @@ import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
 
-# ----------------------------- 初始路径 -----------------------------
+# ----------------------------- 南京科技职业学院地理信息 -----------------------------
+CAMPUS_CENTER = [32.235447, 118.743617]  # GeoHack 精确坐标（WGS84）
+CAMPUS_ZOOM = 16                         # 缩放级别，看清校园内部
+CAMPUS_NAME = "南京科技职业学院"
+CAMPUS_ADDRESS = "南京市江北新区欣乐路188号"
+
+# 校园大致边界多边形（根据学校占地740亩和坐标估算，实际使用时请替换为真实边界）
+CAMPUS_BOUNDARY = [
+    [32.2370, 118.7405],  # 西北角
+    [32.2370, 118.7465],  # 东北角
+    [32.2335, 118.7465],  # 东南角
+    [32.2335, 118.7405],  # 西南角
+    [32.2370, 118.7405],  # 闭合回西北角
+]
+
+# 校园主要建筑（坐标需根据实际情况精确调整）
+CAMPUS_FACILITIES = [
+    {"name": "行政楼", "lat": 32.2358, "lon": 118.7432, "icon": "info-sign", "color": "red"},
+    {"name": "教学楼群", "lat": 32.2350, "lon": 118.7445, "icon": "education", "color": "red"},
+    {"name": "图书馆", "lat": 32.2345, "lon": 118.7428, "icon": "book", "color": "red"},
+    {"name": "学生食堂", "lat": 32.2338, "lon": 118.7435, "icon": "cutlery", "color": "red"},
+    {"name": "实验实训中心", "lat": 32.2360, "lon": 118.7440, "icon": "cog", "color": "red"},
+    {"name": "体育场", "lat": 32.2365, "lon": 118.7450, "icon": "flag", "color": "red"},
+]
+
+# ----------------------------- 初始路径（无人机飞行路线） -----------------------------
 DEFAULT_POINTS = [
     {"lat": 32.2322, "lon": 118.7858, "name": "校门"},
     {"lat": 32.2330, "lon": 118.7862, "name": "教学楼A"},
@@ -34,7 +59,7 @@ now = time.time()
 
 points = st.session_state.points
 if len(points) < 2:
-    lat, lon = points[0]["lat"], points[0]["lon"] if points else (32.2322, 118.7858)
+    lat, lon = points[0]["lat"], points[0]["lon"] if points else (CAMPUS_CENTER[0], CAMPUS_CENTER[1])
 else:
     total_segments = len(points)
     steps_per_segment = 8
@@ -99,6 +124,7 @@ chart_placeholder = st.empty()
 map_placeholder = st.empty()
 debug_placeholder = st.empty()
 
+# 心跳状态显示
 now = time.time()
 last = st.session_state.last_received
 delta = now - last
@@ -118,6 +144,7 @@ with placeholder.container():
     else:
         st.success("✅ 连接正常")
 
+# 调试信息
 with debug_placeholder.container():
     pos_len = len(st.session_state.positions)
     st.info(f"当前 positions 队列长度: {pos_len}")
@@ -140,30 +167,62 @@ if st.session_state.history:
 else:
     chart_placeholder.info("等待心跳数据...")
 
-# 地图
+# ----------------------------- 地图（南京科技职业学院定制） -----------------------------
 if st.session_state.positions:
     pos_df = pd.DataFrame(st.session_state.positions, columns=['lat', 'lon', 'altitude', 'seq'])
     current_pos = pos_df.iloc[-1]
-    try:
-        m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="OpenStreetMap")
-    except:
-        m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="CartoDB positron")
-    
+
+    # 创建地图，以校园为中心
+    m = folium.Map(location=CAMPUS_CENTER, zoom_start=CAMPUS_ZOOM, tiles="OpenStreetMap")
+
+    # 添加校园范围多边形（示意）
+    folium.Polygon(
+        locations=CAMPUS_BOUNDARY,
+        color="green",
+        weight=2,
+        fill=True,
+        fill_color="green",
+        fill_opacity=0.15,
+        popup=f"{CAMPUS_NAME} 校园范围"
+    ).add_to(m)
+
+    # 添加学校主入口标注
+    folium.Marker(
+        location=[CAMPUS_CENTER[0] - 0.0002, CAMPUS_CENTER[1] + 0.0001],  # 微调位置
+        popup=folium.Popup(
+            f"<b>{CAMPUS_NAME}</b><br>地址：{CAMPUS_ADDRESS}<br>占地面积：740亩<br>建校：1958年",
+            max_width=300
+        ),
+        icon=folium.Icon(color="blue", icon="home", prefix='glyphicon')
+    ).add_to(m)
+
+    # 添加校园主要建筑
+    for f in CAMPUS_FACILITIES:
+        folium.Marker(
+            location=[f["lat"], f["lon"]],
+            popup=folium.Popup(f["name"], max_width=200),
+            icon=folium.Icon(color=f["color"], icon=f["icon"], prefix='glyphicon')
+        ).add_to(m)
+
+    # 规划路径（青色闭合线）
     points_coords = [[p["lat"], p["lon"]] for p in st.session_state.points]
     closed_coords = points_coords + [points_coords[0]]
     folium.PolyLine(closed_coords, color="cyan", weight=3, opacity=0.8).add_to(m)
-    
+
+    # 实际轨迹（黄色线）
     if len(pos_df) > 1:
         track_coords = pos_df[['lat', 'lon']].values.tolist()
         folium.PolyLine(track_coords, color="yellow", weight=2).add_to(m)
-    
+
+    # 路径点标注
     for p in st.session_state.points:
         folium.Marker(
             location=[p["lat"], p["lon"]],
             popup=folium.Popup(p["name"], max_width=200),
             icon=folium.Icon(color="blue", icon="info-sign")
         ).add_to(m)
-    
+
+    # 当前位置
     folium.CircleMarker(
         location=[current_pos['lat'], current_pos['lon']],
         radius=8,
@@ -173,11 +232,12 @@ if st.session_state.positions:
         fill_opacity=0.8,
         popup=f"心跳序号: {current_pos['seq']}<br>海拔: {current_pos['altitude']} m"
     ).add_to(m)
-    
-    st_folium(m, width=800, height=500, key="map")
+
+    # 显示地图（固定 key 以减少重绘）
+    st_folium(m, width=800, height=500, key="njpi_map")
 else:
     map_placeholder.info("等待位置数据...")
 
-# 延迟1秒后重新运行脚本，实现“实时刷新”
-time.sleep(10)
+# ----------------------------- 刷新控制 -----------------------------
+time.sleep(3)  # 降低刷新频率，减少地图跳动
 st.rerun()
