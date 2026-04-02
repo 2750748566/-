@@ -27,9 +27,13 @@ if "initialized" not in st.session_state:
     st.session_state.timeout_flag = False
     st.session_state.initialized = True
 
-# 全局数据结构（线程安全）
-history = deque(maxlen=200)
-positions = deque(maxlen=100)
+# 将数据队列也存入 session_state，避免每次 rerun 时重置
+if "history" not in st.session_state:
+    st.session_state.history = deque(maxlen=200)
+if "positions" not in st.session_state:
+    st.session_state.positions = deque(maxlen=100)
+
+# 线程锁（用于保护队列操作）
 history_lock = threading.Lock()
 positions_lock = threading.Lock()
 
@@ -68,15 +72,15 @@ def heartbeat_sender():
             st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
             st.session_state.timeout_flag = False
 
-            # 存储数据（加锁）
+            # 存储数据到 session_state 中的队列（加锁）
             with history_lock:
-                history.append((now, seq))
+                st.session_state.history.append((now, seq))
             with positions_lock:
-                positions.append((lat, lon, altitude, seq))
+                st.session_state.positions.append((lat, lon, altitude, seq))
 
             # 调试：每5秒打印一次队列长度
             if seq % 5 == 0:
-                print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(positions)}")
+                print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(st.session_state.positions)}")
 
     except Exception as e:
         print(f"后台线程出错: {e}")
@@ -124,7 +128,7 @@ if st.sidebar.button("➕ 添加路径点"):
     points_to_edit.append({"name": new_name, "lat": new_lat, "lon": new_lon})
     st.rerun()
 
-# 保存修改后的路径点（当发生变化时更新 session_state）
+# 保存修改后的路径点
 if points_to_edit != st.session_state.points:
     st.session_state.points = points_to_edit
     st.rerun()
@@ -161,15 +165,15 @@ with placeholder.container():
 # 调试信息：显示 positions 长度
 with debug_placeholder.container():
     with positions_lock:
-        pos_len = len(positions)
+        pos_len = len(st.session_state.positions)
     st.info(f"当前 positions 队列长度: {pos_len}")
     if pos_len == 0:
         st.warning("⚠️ 尚未收到任何位置数据，请检查后台线程是否运行。")
 
 # 心跳折线图
 with history_lock:
-    if history:
-        df = pd.DataFrame(history, columns=['timestamp', 'seq'])
+    if st.session_state.history:
+        df = pd.DataFrame(st.session_state.history, columns=['timestamp', 'seq'])
         df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
@@ -185,10 +189,9 @@ with history_lock:
 
 # 地图
 with positions_lock:
-    if positions:
-        pos_df = pd.DataFrame(positions, columns=['lat', 'lon', 'altitude', 'seq'])
+    if st.session_state.positions:
+        pos_df = pd.DataFrame(st.session_state.positions, columns=['lat', 'lon', 'altitude', 'seq'])
         current_pos = pos_df.iloc[-1]
-        # 使用 CartoDB 底图（如果网络问题，可换为 OpenStreetMap）
         try:
             m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="OpenStreetMap")
         except:
@@ -227,6 +230,6 @@ with positions_lock:
     else:
         map_placeholder.info("等待位置数据...")
 
-# 延迟1秒后重新运行脚本，实现“实时刷新”
+# 延迟1秒后重新运行脚本
 time.sleep(1)
 st.rerun()
