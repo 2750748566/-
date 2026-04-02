@@ -2,213 +2,99 @@ import streamlit as st
 import time
 import threading
 import pandas as pd
-import numpy as np
 from collections import deque
+import datetime
 import matplotlib.pyplot as plt
-import folium
-from streamlit_folium import st_folium
 
-# ----------------------------- 初始路径 -----------------------------
-DEFAULT_POINTS = [
-    {"lat": 32.2322, "lon": 118.7858, "name": "校门"},
-    {"lat": 32.2330, "lon": 118.7862, "name": "教学楼A"},
-    {"lat": 32.2335, "lon": 118.7855, "name": "图书馆"},
-    {"lat": 32.2327, "lon": 118.7848, "name": "食堂"},
-]
-
-# ----------------------------- 模块级数据队列（线程安全）-----------------------------
-_history = deque(maxlen=200)
-_positions = deque(maxlen=100)
-_history_lock = threading.Lock()
-_positions_lock = threading.Lock()
+# 用于存储心跳历史的全局数据结构
+history = deque(maxlen=200)
+history_lock = threading.Lock()
 
 def heartbeat_sender():
-    """后台线程：每秒生成心跳和位置，存入模块级队列"""
+    """后台线程：每秒发送一次心跳（模拟自收自发）"""
     seq = 0
     while True:
         time.sleep(1)
         seq += 1
         now = time.time()
-        # 获取当前路径点（从 session_state 读取是安全的，仅读取）
-        points = st.session_state.get("points", DEFAULT_POINTS)
-        if len(points) < 2:
-            lat, lon = points[0]["lat"], points[0]["lon"] if points else (32.2322, 118.7858)
-        else:
-            total_segments = len(points)
-            steps_per_segment = 8
-            total_steps = total_segments * steps_per_segment
-            step = (seq - 1) % total_steps
-            segment = step // steps_per_segment
-            step_in_segment = step % steps_per_segment
-            start = points[segment]
-            end = points[(segment + 1) % total_segments]
-            t = step_in_segment / steps_per_segment
-            lat = start["lat"] + (end["lat"] - start["lat"]) * t
-            lon = start["lon"] + (end["lon"] - start["lon"]) * t
-        altitude = seq * 2
+        # 更新 session_state 中的实时信息
+        st.session_state['last_received'] = now
+        st.session_state['current_seq'] = seq
+        st.session_state['last_heartbeat_info'] = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
+        st.session_state['timeout_flag'] = False  # 收到心跳，重置超时标志
+        
+        # 将心跳记录加入历史（线程安全）
+        with history_lock:
+            history.append((now, seq))
 
-        # 更新 session_state 中的实时状态（单个值，不是队列）
-        st.session_state.last_received = now
-        st.session_state.current_seq = seq
-        st.session_state.last_heartbeat_info = f"序号: {seq}, 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}"
-        st.session_state.timeout_flag = False
-
-        # 数据存入模块级队列（加锁）
-        with _history_lock:
-            _history.append((now, seq))
-        with _positions_lock:
-            _positions.append((lat, lon, altitude, seq))
-
-        if seq % 10 == 0:
-            print(f"[线程] 已生成 {seq} 个心跳，positions 长度 {len(_positions)}")
-
-# ----------------------------- 初始化 session_state -----------------------------
-if "points" not in st.session_state:
-    st.session_state.points = DEFAULT_POINTS.copy()
-if "initialized" not in st.session_state:
-    st.session_state.last_received = time.time()
-    st.session_state.current_seq = 0
-    st.session_state.last_heartbeat_info = "等待心跳..."
-    st.session_state.timeout_flag = False
-    st.session_state.initialized = True
-
-# 启动后台线程（只启动一次）
-if "thread_started" not in st.session_state:
+# 初始化 session_state
+if 'initialized' not in st.session_state:
+    st.session_state['last_received'] = time.time()
+    st.session_state['current_seq'] = 0
+    st.session_state['last_heartbeat_info'] = "等待心跳..."
+    st.session_state['timeout_flag'] = False
+    st.session_state['initialized'] = True
+    # 启动后台心跳线程
     thread = threading.Thread(target=heartbeat_sender, daemon=True)
     thread.start()
-    st.session_state.thread_started = True
 
-# ----------------------------- 页面布局 -----------------------------
-st.title("🚁 无人机心跳监控 + 动态航线")
-st.markdown("在侧边栏编辑路径点，无人机按顺序循环飞行。地图使用 CartoDB 底图，显示路径、地名和实时位置。")
+# 页面标题
+st.title("🚁 无人机心跳监控")
+st.markdown("模拟无人机心跳自收自发，每秒发送一次，3秒未收到则报警")
 
-# 侧边栏：路径编辑器
-st.sidebar.subheader("🗺️ 编辑飞行路径")
-with st.sidebar.form("edit_points"):
-    edited_points = []
-    for i, p in enumerate(st.session_state.points):
-        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
-        with col1:
-            name = st.text_input("地名", value=p["name"], key=f"name_{i}")
-        with col2:
-            lat = st.number_input("纬度", value=p["lat"], format="%.6f", key=f"lat_{i}")
-        with col3:
-            lon = st.number_input("经度", value=p["lon"], format="%.6f", key=f"lon_{i}")
-        with col4:
-            delete = st.checkbox("删除", key=f"del_{i}")
-        if not delete:
-            edited_points.append({"name": name, "lat": lat, "lon": lon})
-    col1, col2 = st.columns(2)
-    with col1:
-        new_name = st.text_input("新增地名", placeholder="新点名称", key="new_name")
-    with col2:
-        new_lat = st.number_input("新增纬度", value=32.2325, format="%.6f", key="new_lat")
-        new_lon = st.number_input("新增经度", value=118.7855, format="%.6f", key="new_lon")
-    if st.form_submit_button("保存航线"):
-        if new_name.strip():
-            edited_points.append({"name": new_name, "lat": new_lat, "lon": new_lon})
-        if len(edited_points) >= 2:
-            st.session_state.points = edited_points
-            st.success("航线已更新！")
-        else:
-            st.error("至少需要两个点才能构成路径。")
+# 实时显示当前系统时间
+current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+st.sidebar.metric("🕒 本地系统时间", current_time)
 
-st.sidebar.subheader("📌 当前航线顺序")
-for idx, p in enumerate(st.session_state.points):
-    st.sidebar.write(f"{idx+1}. {p['name']} ({p['lat']:.6f}, {p['lon']:.6f})")
-
-# 实时显示区
+# 实时显示区域
 placeholder = st.empty()
-chart_placeholder = st.empty()
-map_placeholder = st.empty()
-debug_placeholder = st.empty()
+chart_placeholder = st.empty()  # 用于放置图表的占位符
 
-# ----------------------------- 主流程：从模块队列取数据快照 -----------------------------
-# 将队列数据快照到 session_state 中，用于本次渲染
-with _history_lock:
-    st.session_state.history_snapshot = list(_history)
-with _positions_lock:
-    st.session_state.positions_snapshot = list(_positions)
+# 主循环：每秒刷新页面，检查超时并更新图表
+while True:
+    now = time.time()
+    last = st.session_state['last_received']
+    delta = now - last
+    delta_int = int(round(delta))  # 取整数
 
-# 超时检测
-now = time.time()
-last = st.session_state.last_received
-delta = now - last
-delta_int = int(round(delta))
+    # 检查超时
+    if delta > 3 and not st.session_state['timeout_flag']:
+        st.session_state['timeout_flag'] = True
 
-if delta > 3 and not st.session_state.timeout_flag:
-    st.session_state.timeout_flag = True
+    # 更新顶部实时指标区域
+    with placeholder.container():
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("最新心跳", st.session_state['last_heartbeat_info'])
+        with col2:
+            st.metric("距上次心跳", f"{delta_int} 秒")  # 显示整数秒
 
-with placeholder.container():
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("最新心跳", st.session_state.last_heartbeat_info)
-    with col2:
-        st.metric("距上次心跳", f"{delta_int} 秒")
-    if st.session_state.timeout_flag:
-        st.error("⚠️ 连接超时！超过 3 秒未收到心跳。")
-    else:
-        st.success("✅ 连接正常")
+        if st.session_state['timeout_flag']:
+            st.error("⚠️ 连接超时！超过 3 秒未收到心跳。")
+        else:
+            st.success("✅ 连接正常")
 
-# 调试信息
-debug_placeholder.info(f"当前 positions 队列长度: {len(st.session_state.positions_snapshot)}")
+    # 绘制心跳包数曲线图（横轴为本地时间，精确到秒）
+    with history_lock:
+        if history:
+            # 将历史数据转换为 DataFrame
+            df = pd.DataFrame(history, columns=['timestamp', 'seq'])
+            # 将时间戳转换为本地时间字符串（格式 HH:MM:SS）
+            df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
+            
+            # 使用 matplotlib 绘制折线图
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
+            ax.set_xlabel('时间 (时:分:秒)')
+            ax.set_ylabel('心跳包序号')
+            ax.set_title('心跳包数量变化趋势')
+            # 自动调整横轴标签，避免重叠
+            plt.xticks(rotation=45, ha='right')
+            # 如果数据点过多，可自动选择部分标签显示（这里保留全部，但旋转45度）
+            plt.tight_layout()
+            chart_placeholder.pyplot(fig)
+            plt.close(fig)
+        else:
+            chart_placeholder.info("等待心跳数据...")
 
-# 心跳折线图
-if st.session_state.history_snapshot:
-    df = pd.DataFrame(st.session_state.history_snapshot, columns=['timestamp', 'seq'])
-    df['time_str'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%H:%M:%S')
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(df['time_str'], df['seq'], marker='o', markersize=4, linewidth=2, color='#1f77b4')
-    ax.set_xlabel('时间 (时:分:秒)')
-    ax.set_ylabel('心跳包序号')
-    ax.set_title('心跳包数量变化趋势')
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    chart_placeholder.pyplot(fig)
-    plt.close(fig)
-else:
-    chart_placeholder.info("等待心跳数据...")
-
-# 地图
-if st.session_state.positions_snapshot:
-    pos_df = pd.DataFrame(st.session_state.positions_snapshot, columns=['lat', 'lon', 'altitude', 'seq'])
-    current_pos = pos_df.iloc[-1]
-    # 使用 CartoDB 底图（稳定，无需代理）
-    m = folium.Map(location=[current_pos['lat'], current_pos['lon']], zoom_start=18, tiles="CartoDB positron")
-    
-    # 规划路径（青色闭合线）
-    points_coords = [[p["lat"], p["lon"]] for p in st.session_state.points]
-    closed_coords = points_coords + [points_coords[0]]
-    folium.PolyLine(closed_coords, color="cyan", weight=3, opacity=0.8).add_to(m)
-    
-    # 实际轨迹（黄色线）
-    if len(pos_df) > 1:
-        track_coords = pos_df[['lat', 'lon']].values.tolist()
-        folium.PolyLine(track_coords, color="yellow", weight=2).add_to(m)
-    
-    # 路径点标注
-    for p in st.session_state.points:
-        folium.Marker(
-            location=[p["lat"], p["lon"]],
-            popup=folium.Popup(p["name"], max_width=200),
-            icon=folium.Icon(color="blue", icon="info-sign")
-        ).add_to(m)
-    
-    # 当前位置
-    folium.CircleMarker(
-        location=[current_pos['lat'], current_pos['lon']],
-        radius=8,
-        color="red",
-        fill=True,
-        fill_color="red",
-        fill_opacity=0.8,
-        popup=f"心跳序号: {current_pos['seq']}<br>海拔: {current_pos['altitude']} m"
-    ).add_to(m)
-    
-    st_folium(m, width=800, height=500, key="map")
-else:
-    map_placeholder.info("等待位置数据...")
-
-# 延迟后重新运行
-time.sleep(1)
-st.rerun()
+    time.sleep(1)  # 每秒刷新一次
