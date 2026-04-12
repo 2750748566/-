@@ -6,12 +6,11 @@ import numpy as np
 from collections import deque
 import datetime
 import matplotlib.pyplot as plt
-import folium
-from streamlit_folium import st_folium
 import math
 import random
+import json
 
-# ================== 坐标转换 (WGS84 <-> GCJ02) 备用 ==================
+# ================== 坐标转换（备用，高德直接使用 GCJ-02） ==================
 def out_of_china(lng, lat):
     return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
 
@@ -46,12 +45,8 @@ def wgs84_to_gcj02(lng, lat):
     mg_lng = lng + dlng
     return mg_lng, mg_lat
 
-def gcj02_to_wgs84(lng, lat):
-    """如果需要，可反向转换，但本系统直接使用GCJ-02，无需转换"""
-    return lng, lat
-
 # ================== 全局数据存储 ==================
-history_heartbeat = deque(maxlen=200)     # (timestamp, seq)
+history_heartbeat = deque(maxlen=200)
 history_lock = threading.Lock()
 
 shared_state = {
@@ -59,42 +54,33 @@ shared_state = {
     'last_seq': 0,
     'timeout_flag': False,
     'running': True,
-    # 无人机当前位置（GCJ-02），初始为南京科技职业学院中心
     'current_lng': 118.749413,
     'current_lat': 32.234097,
-    # 起点 A（GCJ-02）
     'A_lng': 118.749413,
     'A_lat': 32.234097,
-    # 终点 B（GCJ-02）
     'B_lng': 118.749413,
-    'B_lat': 32.236000,   # 向北偏移约200米
-    'progress': 0.0,          # 0~1 从A到B的进度
-    'direction': 1,           # 1: A->B, -1: B->A
-    'speed': 0.01,            # 每秒进度变化
-    'flight_height': 10       # 飞行高度（米）
+    'B_lat': 32.236000,
+    'progress': 0.0,
+    'direction': 1,
+    'speed': 0.01,
+    'flight_height': 10
 }
 state_lock = threading.Lock()
 
-# ================== 生成障碍物（在AB连线上） ==================
-def generate_obstacles(A_lng, A_lat, B_lng, B_lat, num_obstacles=5):
-    """在AB连线上生成若干障碍物点（GCJ-02坐标 + 高度米）"""
+def generate_obstacles(A_lng, A_lat, B_lng, B_lat, num=5):
     obstacles = []
-    for i in range(1, num_obstacles+1):
-        ratio = i / (num_obstacles + 1)  # 避开端点
+    for i in range(1, num+1):
+        ratio = i / (num+1)
         lng = A_lng + (B_lng - A_lng) * ratio
         lat = A_lat + (B_lat - A_lat) * ratio
-        # 随机高度 20~80 米
         height = random.uniform(20, 80)
         obstacles.append((lng, lat, height))
     return obstacles
 
-# ================== 后台线程：心跳发送 + 位置更新（沿AB往返） ==================
 def update_position_from_progress():
     with state_lock:
-        A_lng = shared_state['A_lng']
-        A_lat = shared_state['A_lat']
-        B_lng = shared_state['B_lng']
-        B_lat = shared_state['B_lat']
+        A_lng, A_lat = shared_state['A_lng'], shared_state['A_lat']
+        B_lng, B_lat = shared_state['B_lng'], shared_state['B_lat']
         progress = shared_state['progress']
     lng = A_lng + (B_lng - A_lng) * progress
     lat = A_lat + (B_lat - A_lat) * progress
@@ -106,8 +92,7 @@ def background_worker():
         time.sleep(1)
         seq += 1
         now = time.time()
-
-        # 更新往返进度
+        # 更新进度
         with state_lock:
             progress = shared_state['progress']
             direction = shared_state['direction']
@@ -120,31 +105,148 @@ def background_worker():
                 new_progress = -new_progress
                 shared_state['direction'] = 1
             shared_state['progress'] = max(0.0, min(1.0, new_progress))
-
         cur_lng, cur_lat = update_position_from_progress()
-
         with state_lock:
             shared_state['last_heartbeat_time'] = now
             shared_state['last_seq'] = seq
             shared_state['current_lng'] = cur_lng
             shared_state['current_lat'] = cur_lat
             shared_state['timeout_flag'] = False
-
         with history_lock:
             history_heartbeat.append((now, seq))
 
+# ================== 生成高德地图 HTML（3D 视图） ==================
+def generate_map_html(center_lng, center_lat, A_lng, A_lat, B_lng, B_lat, obstacles, zoom=18):
+    """生成高德地图 HTML，包含卫星影像、3D 视角、AB 点、障碍物和可动态更新的无人机标记"""
+    obstacles_js = [{'lng': lng, 'lat': lat, 'height': h} for (lng, lat, h) in obstacles]
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="initial-scale=1.0, user-scalable=no">
+        <title>高德3D地图</title>
+        <style>
+            html, body, #container {{ width: 100%; height: 100%; margin: 0; padding: 0; }}
+        </style>
+    </head>
+    <body>
+        <div id="container"></div>
+        <script src="https://webapi.amap.com/maps?v=2.0&key=YOUR_AMAP_KEY"></script>
+        <script>
+            var map;
+            var droneMarker;
+            var startMarker, endMarker;
+            var line;
+            var obstacleCircles = [];
+            
+            function initMap() {{
+                // 创建地图，启用 3D 视图 (viewMode: '3D')
+                map = new AMap.Map('container', {{
+                    center: [{center_lng}, {center_lat}],
+                    zoom: {zoom},
+                    viewMode: '3D',          // 3D 模式
+                    pitch: 60,               // 倾斜角度（度），实现鸟瞰效果
+                    rotation: 0,
+                    layers: [
+                        new AMap.TileLayer.Satellite()  // 卫星图层
+                    ]
+                }});
+                
+                // 起点 A 标记（绿色）
+                startMarker = new AMap.Marker({{
+                    position: [{A_lng}, {A_lat}],
+                    title: '起点 A',
+                    label: {{ content: 'A', offset: new AMap.Pixel(0, -20) }},
+                    icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png'
+                }});
+                map.add(startMarker);
+                
+                // 终点 B 标记（红色）
+                endMarker = new AMap.Marker({{
+                    position: [{B_lng}, {B_lat}],
+                    title: '终点 B',
+                    label: {{ content: 'B', offset: new AMap.Pixel(0, -20) }},
+                    icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png'
+                }});
+                map.add(endMarker);
+                
+                // AB 连线（虚线）
+                line = new AMap.Polyline({{
+                    path: [[{A_lat}, {A_lng}], [{B_lat}, {B_lng}]],
+                    strokeColor: '#808080',
+                    strokeWeight: 3,
+                    strokeStyle: 'dashed'
+                }});
+                map.add(line);
+                
+                // 障碍物（圆形区域 + 高度文本）
+                var obstacles = {json.dumps(obstacles_js)};
+                for (var i = 0; i < obstacles.length; i++) {{
+                    var circle = new AMap.Circle({{
+                        center: [obstacles[i].lng, obstacles[i].lat],
+                        radius: obstacles[i].height * 0.5,
+                        fillColor: '#ff0000',
+                        fillOpacity: 0.5,
+                        strokeColor: '#aa0000',
+                        strokeWeight: 1
+                    }});
+                    map.add(circle);
+                    obstacleCircles.push(circle);
+                    // 显示高度文本
+                    var text = new AMap.Text({{
+                        text: obstacles[i].height.toFixed(0) + 'm',
+                        position: [obstacles[i].lng, obstacles[i].lat],
+                        offset: new AMap.Pixel(0, -10)
+                    }});
+                    map.add(text);
+                }}
+                
+                // 无人机标记（蓝色飞机）
+                droneMarker = new AMap.Marker({{
+                    position: [{A_lng}, {A_lat}],
+                    title: '无人机',
+                    icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_blue.png',
+                    label: {{ content: '✈️', offset: new AMap.Pixel(0, -20) }}
+                }});
+                map.add(droneMarker);
+            }}
+            
+            // 供外部调用的更新无人机位置函数
+            function updateDronePosition(lng, lat) {{
+                if (droneMarker) {{
+                    droneMarker.setPosition([lng, lat]);
+                }}
+            }}
+            
+            window.initMap = initMap;
+            window.updateDronePosition = updateDronePosition;
+            initMap();
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
 # ================== Streamlit 主界面 ==================
 def main():
-    st.set_page_config(page_title="无人机监控系统 - 南京科院 (高德地图)", layout="wide")
-    st.title("🚁 无人机心跳与轨迹监控 (高德卫星地图)")
-    st.markdown("模拟心跳自收自发（每秒1次），3秒未收到则报警；地图为高德卫星影像，支持缩放；AB点之间设有障碍物（红色圆形）")
-
-    # 启动后台线程（仅一次）
+    st.set_page_config(page_title="无人机监控系统 - 南京科院 (高德3D无跳动)", layout="wide")
+    st.title("🚁 无人机心跳与轨迹监控 (高德3D地图 - 完全不跳动)")
+    st.markdown("地图只创建一次，无人机标记通过 JavaScript 动态更新，页面无闪烁。支持 3D 倾斜视角。")
+    
+    # 高德地图 API Key 输入
+    amap_key = st.sidebar.text_input("高德地图 API Key", type="password", 
+                                     help="请到 https://lbs.amap.com/ 注册获取 Web端(JS API) 的 Key")
+    if not amap_key:
+        st.sidebar.warning("请输入高德地图 API Key")
+        st.stop()
+    
+    # 启动后台线程
     if 'worker_started' not in st.session_state:
         st.session_state.worker_started = True
         thread = threading.Thread(target=background_worker, daemon=True)
         thread.start()
-
+    
     # 侧边栏控制面板
     st.sidebar.header("🎮 控制面板")
     st.sidebar.subheader("📍 起点 A (GCJ-02)")
@@ -159,8 +261,8 @@ def main():
             shared_state['A_lat'] = new_A_lat
             shared_state['progress'] = 0.0
             shared_state['direction'] = 1
-        st.sidebar.success("A点已更新")
-
+        st.sidebar.success("A点已更新，请刷新页面以重建地图")
+    
     st.sidebar.subheader("📍 终点 B (GCJ-02)")
     colB1, colB2 = st.sidebar.columns(2)
     with colB1:
@@ -173,15 +275,15 @@ def main():
             shared_state['B_lat'] = new_B_lat
             shared_state['progress'] = 0.0
             shared_state['direction'] = 1
-        st.sidebar.success("B点已更新")
-
+        st.sidebar.success("B点已更新，请刷新页面以重建地图")
+    
     st.sidebar.subheader("✈️ 飞行参数")
     new_height = st.sidebar.number_input("飞行高度 (m)", value=10, step=1, key="height")
     if st.sidebar.button("设置高度"):
         with state_lock:
             shared_state['flight_height'] = new_height
         st.sidebar.success(f"高度设为 {new_height} m")
-
+    
     # 实时状态显示
     st.sidebar.markdown("---")
     st.sidebar.subheader("📡 实时状态")
@@ -189,65 +291,70 @@ def main():
     heartbeat_info_placeholder = st.sidebar.empty()
     timeout_placeholder = st.sidebar.empty()
     flight_info_placeholder = st.sidebar.empty()
-
-    # 主区域布局
+    
     col1, col2 = st.columns([2, 3])
     with col1:
         st.subheader("💓 心跳时序图")
         chart_placeholder = st.empty()
     with col2:
-        st.subheader("🗺️ 高德卫星地图 (可缩放)")
+        st.subheader("🗺️ 高德3D卫星地图 (无跳动)")
         map_placeholder = st.empty()
-
-    # 初始障碍物
-    obstacles = generate_obstacles(
-        shared_state['A_lng'], shared_state['A_lat'],
-        shared_state['B_lng'], shared_state['B_lat'],
-        num_obstacles=5
-    )
-
-    # 主循环：每秒刷新心跳数据和图表，地图每2秒刷新一次
-    iteration = 0
-    last_map_update = 0
-    map_update_interval = 2  # 地图刷新间隔（秒）
-
+    
+    # 生成障碍物（基于当前 A/B）
+    with state_lock:
+        A_lng, A_lat = shared_state['A_lng'], shared_state['A_lat']
+        B_lng, B_lat = shared_state['B_lng'], shared_state['B_lat']
+    obstacles = generate_obstacles(A_lng, A_lat, B_lng, B_lat, num=5)
+    
+    # 计算地图中心（A、B 中点，实际固定为南京科院中心）
+    center_lng = (A_lng + B_lng) / 2
+    center_lat = (A_lat + B_lat) / 2
+    # 更精确地固定为学校中心
+    school_center_lng = 118.749413
+    school_center_lat = 32.234097
+    
+    html_map = generate_map_html(school_center_lng, school_center_lat,
+                                 A_lng, A_lat, B_lng, B_lat, obstacles, zoom=18)
+    html_map = html_map.replace("YOUR_AMAP_KEY", amap_key)
+    
+    # 嵌入地图（只创建一次）
+    with map_placeholder.container():
+        import streamlit.components.v1 as components
+        components.html(html_map, height=550, scrolling=False)
+    
+    # 用于发送 JavaScript 更新命令的占位符
+    script_placeholder = st.empty()
+    
+    # 主循环：每秒更新心跳数据和曲线，并通过 JS 更新无人机位置
     while True:
-        iteration += 1
         now = time.time()
-
         with state_lock:
             last_time = shared_state['last_heartbeat_time']
             seq = shared_state['last_seq']
             timeout_flag = shared_state['timeout_flag']
             cur_lng = shared_state['current_lng']
             cur_lat = shared_state['current_lat']
-            A_lng, A_lat = shared_state['A_lng'], shared_state['A_lat']
-            B_lng, B_lat = shared_state['B_lng'], shared_state['B_lat']
             progress = shared_state['progress']
             height = shared_state['flight_height']
-
+        
         delta = now - last_time
         delta_int = int(round(delta))
-
-        # 超时检测
+        
         if delta > 3 and not timeout_flag:
             with state_lock:
                 shared_state['timeout_flag'] = True
-
-        # 更新侧边栏（每秒）
+        
+        # 侧边栏更新
         local_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         local_time_placeholder.metric("🕒 本地时间", local_time_str)
-        heartbeat_info_placeholder.metric(
-            "最新心跳",
-            f"序号 {seq}  @ {time.strftime('%H:%M:%S', time.localtime(last_time))}"
-        )
+        heartbeat_info_placeholder.metric("最新心跳", f"序号 {seq}  @ {time.strftime('%H:%M:%S', time.localtime(last_time))}")
         if timeout_flag or delta > 3:
             timeout_placeholder.error(f"⚠️ 连接超时！ 已 {delta_int} 秒未收到心跳")
         else:
             timeout_placeholder.success(f"✅ 连接正常  距上次心跳 {delta_int} 秒")
         flight_info_placeholder.metric("飞行进度", f"{progress*100:.1f}%  (A→B往返)")
-
-        # 心跳曲线图（每秒）
+        
+        # 心跳曲线图
         with history_lock:
             if history_heartbeat:
                 df = pd.DataFrame(history_heartbeat, columns=['timestamp', 'seq'])
@@ -263,65 +370,18 @@ def main():
                 plt.close(fig)
             else:
                 chart_placeholder.info("等待心跳数据...")
-
-        # 地图更新（降低频率）
-        if now - last_map_update >= map_update_interval:
-            # 创建 Folium 地图，使用高德卫星瓦片
-            # 注意：高德瓦片 URL 中的 style=6 表示卫星图，style=8 表示街道图
-            m = folium.Map(
-                location=[cur_lat, cur_lng],
-                zoom_start=17,
-                control_scale=True,
-                tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-                attr='高德地图'
-            )
-            # 可选：添加一个高德卫星图层（默认就是）
-            # 添加起点 A 标记
-            folium.Marker(
-                location=[A_lat, A_lng],
-                popup=f"起点 A<br>GCJ-02: {A_lng:.6f}, {A_lat:.6f}",
-                icon=folium.Icon(color='green', icon='play', prefix='fa')
-            ).add_to(m)
-            # 添加终点 B 标记
-            folium.Marker(
-                location=[B_lat, B_lng],
-                popup=f"终点 B<br>GCJ-02: {B_lng:.6f}, {B_lat:.6f}",
-                icon=folium.Icon(color='orange', icon='flag-checkered', prefix='fa')
-            ).add_to(m)
-            # 绘制 AB 连线（虚线）
-            folium.PolyLine(
-                locations=[[A_lat, A_lng], [B_lat, B_lng]],
-                color='gray', weight=2, opacity=0.6, dash_array='5,5'
-            ).add_to(m)
-            # 添加障碍物（用红色圆形标记，半径随高度变化）
-            for lng, lat, h in obstacles:
-                folium.CircleMarker(
-                    location=[lat, lng],
-                    radius=5 + h/20,   # 高度越高半径越大
-                    color='red',
-                    fill=True,
-                    fill_opacity=0.6,
-                    popup=f"障碍物<br>高度: {h:.1f}米"
-                ).add_to(m)
-            # 添加无人机当前位置（蓝色飞机图标）
-            folium.Marker(
-                location=[cur_lat, cur_lng],
-                popup=f"无人机<br>序号: {seq}<br>高度: {height}m<br>进度: {progress*100:.1f}%",
-                icon=folium.Icon(color='blue', icon='plane', prefix='fa')
-            ).add_to(m)
-            # 添加圆形指示范围（可选）
-            folium.Circle(
-                radius=20,
-                location=[cur_lat, cur_lng],
-                color='blue',
-                fill=True,
-                fill_opacity=0.2
-            ).add_to(m)
-            # 渲染地图
-            with map_placeholder.container():
-                st_folium(m, width=650, height=500, key=f"map_{iteration}")
-            last_map_update = now
-
+        
+        # 通过 JavaScript 更新无人机位置（无页面刷新）
+        js_code = f"""
+        <script>
+            var iframe = document.querySelector('iframe');
+            if (iframe && iframe.contentWindow) {{
+                iframe.contentWindow.updateDronePosition({cur_lng}, {cur_lat});
+            }}
+        </script>
+        """
+        script_placeholder.components.v1.html(js_code, height=0)
+        
         time.sleep(1)
 
 if __name__ == "__main__":
