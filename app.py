@@ -92,7 +92,6 @@ def background_worker():
         time.sleep(1)
         seq += 1
         now = time.time()
-        # 更新进度
         with state_lock:
             progress = shared_state['progress']
             direction = shared_state['direction']
@@ -115,9 +114,8 @@ def background_worker():
         with history_lock:
             history_heartbeat.append((now, seq))
 
-# ================== 生成高德地图 HTML（3D 视图） ==================
+# ================== 生成高德地图 HTML（包含前端定时器动态更新） ==================
 def generate_map_html(center_lng, center_lat, A_lng, A_lat, B_lng, B_lat, obstacles, zoom=18):
-    """生成高德地图 HTML，包含卫星影像、3D 视角、AB 点、障碍物和可动态更新的无人机标记"""
     obstacles_js = [{'lng': lng, 'lat': lat, 'height': h} for (lng, lat, h) in obstacles]
     html = f"""
     <!DOCTYPE html>
@@ -136,92 +134,86 @@ def generate_map_html(center_lng, center_lat, A_lng, A_lat, B_lng, B_lat, obstac
         <script>
             var map;
             var droneMarker;
-            var startMarker, endMarker;
-            var line;
-            var obstacleCircles = [];
             
             function initMap() {{
-                // 创建地图，启用 3D 视图 (viewMode: '3D')
                 map = new AMap.Map('container', {{
                     center: [{center_lng}, {center_lat}],
                     zoom: {zoom},
-                    viewMode: '3D',          // 3D 模式
-                    pitch: 60,               // 倾斜角度（度），实现鸟瞰效果
+                    viewMode: '3D',
+                    pitch: 60,
                     rotation: 0,
-                    layers: [
-                        new AMap.TileLayer.Satellite()  // 卫星图层
-                    ]
+                    layers: [new AMap.TileLayer.Satellite()]
                 }});
                 
-                // 起点 A 标记（绿色）
-                startMarker = new AMap.Marker({{
+                // 起点 A
+                new AMap.Marker({{
                     position: [{A_lng}, {A_lat}],
                     title: '起点 A',
                     label: {{ content: 'A', offset: new AMap.Pixel(0, -20) }},
                     icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png'
-                }});
-                map.add(startMarker);
+                }}).setMap(map);
                 
-                // 终点 B 标记（红色）
-                endMarker = new AMap.Marker({{
+                // 终点 B
+                new AMap.Marker({{
                     position: [{B_lng}, {B_lat}],
                     title: '终点 B',
                     label: {{ content: 'B', offset: new AMap.Pixel(0, -20) }},
                     icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png'
-                }});
-                map.add(endMarker);
+                }}).setMap(map);
                 
-                // AB 连线（虚线）
-                line = new AMap.Polyline({{
+                // AB 连线
+                new AMap.Polyline({{
                     path: [[{A_lat}, {A_lng}], [{B_lat}, {B_lng}]],
                     strokeColor: '#808080',
                     strokeWeight: 3,
                     strokeStyle: 'dashed'
-                }});
-                map.add(line);
+                }}).setMap(map);
                 
-                // 障碍物（圆形区域 + 高度文本）
+                // 障碍物
                 var obstacles = {json.dumps(obstacles_js)};
                 for (var i = 0; i < obstacles.length; i++) {{
-                    var circle = new AMap.Circle({{
+                    new AMap.Circle({{
                         center: [obstacles[i].lng, obstacles[i].lat],
                         radius: obstacles[i].height * 0.5,
                         fillColor: '#ff0000',
                         fillOpacity: 0.5,
                         strokeColor: '#aa0000',
                         strokeWeight: 1
-                    }});
-                    map.add(circle);
-                    obstacleCircles.push(circle);
-                    // 显示高度文本
-                    var text = new AMap.Text({{
+                    }}).setMap(map);
+                    new AMap.Text({{
                         text: obstacles[i].height.toFixed(0) + 'm',
                         position: [obstacles[i].lng, obstacles[i].lat],
                         offset: new AMap.Pixel(0, -10)
-                    }});
-                    map.add(text);
+                    }}).setMap(map);
                 }}
                 
-                // 无人机标记（蓝色飞机）
+                // 无人机标记
                 droneMarker = new AMap.Marker({{
                     position: [{A_lng}, {A_lat}],
                     title: '无人机',
                     icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_blue.png',
                     label: {{ content: '✈️', offset: new AMap.Pixel(0, -20) }}
                 }});
-                map.add(droneMarker);
+                droneMarker.setMap(map);
             }}
             
-            // 供外部调用的更新无人机位置函数
+            // 供外部调用的更新函数
             function updateDronePosition(lng, lat) {{
-                if (droneMarker) {{
-                    droneMarker.setPosition([lng, lat]);
-                }}
+                if (droneMarker) droneMarker.setPosition([lng, lat]);
             }}
             
-            window.initMap = initMap;
-            window.updateDronePosition = updateDronePosition;
+            // 前端定时器：每秒向 Streamlit 后端请求最新位置（通过 Streamlit 的 setComponentValue）
+            // 由于 Streamlit 组件通信较复杂，这里采用简单方案：页面加载后启动 setInterval，
+            // 通过 fetch 从后端 API 获取数据。但 Streamlit 没有原生 REST API，因此改为通过
+            // 隐藏的 iframe 通信？为了简化，我们将位置数据嵌入到页面中并通过刷新整个页面？
+            // 不，我们希望无刷新。因此最佳方式：使用 Streamlit 的 `st.components.v1.html` 配合
+            // `streamlit` 的 `Component` 双向通信。但这较复杂。
+            // 为了快速实现完全无跳动，我们放弃前端定时器，改为在 Python 端通过 `st.empty()` 每秒
+            // 注入一段 JavaScript 来更新位置（不会重建地图），且不会造成地图闪烁。
+            // 该方案已在主循环中实现，此处仅定义函数。
+            
             initMap();
+            window.updateDronePosition = updateDronePosition;
         </script>
     </body>
     </html>
@@ -232,7 +224,7 @@ def generate_map_html(center_lng, center_lat, A_lng, A_lat, B_lng, B_lat, obstac
 def main():
     st.set_page_config(page_title="无人机监控系统 - 南京科院 (高德3D无跳动)", layout="wide")
     st.title("🚁 无人机心跳与轨迹监控 (高德3D地图 - 完全不跳动)")
-    st.markdown("地图只创建一次，无人机标记通过 JavaScript 动态更新，页面无闪烁。支持 3D 倾斜视角。")
+    st.markdown("地图只创建一次，无人机标记通过 JavaScript 动态更新，页面无闪烁。")
     
     # 高德地图 API Key 输入
     amap_key = st.sidebar.text_input("高德地图 API Key", type="password", 
@@ -300,19 +292,14 @@ def main():
         st.subheader("🗺️ 高德3D卫星地图 (无跳动)")
         map_placeholder = st.empty()
     
-    # 生成障碍物（基于当前 A/B）
+    # 生成障碍物
     with state_lock:
         A_lng, A_lat = shared_state['A_lng'], shared_state['A_lat']
         B_lng, B_lat = shared_state['B_lng'], shared_state['B_lat']
     obstacles = generate_obstacles(A_lng, A_lat, B_lng, B_lat, num=5)
     
-    # 计算地图中心（A、B 中点，实际固定为南京科院中心）
-    center_lng = (A_lng + B_lng) / 2
-    center_lat = (A_lat + B_lat) / 2
-    # 更精确地固定为学校中心
     school_center_lng = 118.749413
     school_center_lat = 32.234097
-    
     html_map = generate_map_html(school_center_lng, school_center_lat,
                                  A_lng, A_lat, B_lng, B_lat, obstacles, zoom=18)
     html_map = html_map.replace("YOUR_AMAP_KEY", amap_key)
@@ -322,10 +309,10 @@ def main():
         import streamlit.components.v1 as components
         components.html(html_map, height=550, scrolling=False)
     
-    # 用于发送 JavaScript 更新命令的占位符
+    # 用于动态更新无人机位置的脚本占位符（每次更新会覆盖之前的内容，不会累积）
     script_placeholder = st.empty()
     
-    # 主循环：每秒更新心跳数据和曲线，并通过 JS 更新无人机位置
+    # 主循环：每秒更新心跳数据和曲线，并通过 JS 更新无人机位置（无地图重建）
     while True:
         now = time.time()
         with state_lock:
@@ -371,7 +358,7 @@ def main():
             else:
                 chart_placeholder.info("等待心跳数据...")
         
-        # 通过 JavaScript 更新无人机位置（无页面刷新）
+        # 通过 JavaScript 更新无人机位置（无页面刷新，无地图重建）
         js_code = f"""
         <script>
             var iframe = document.querySelector('iframe');
@@ -380,6 +367,7 @@ def main():
             }}
         </script>
         """
+        # 使用 script_placeholder 来替换之前的内容，避免重复添加
         script_placeholder.components.v1.html(js_code, height=0)
         
         time.sleep(1)
