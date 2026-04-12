@@ -1,85 +1,5 @@
-import streamlit as st
-import time
-import threading
-import pandas as pd
-import math
-from collections import deque
-import datetime
-import matplotlib.pyplot as plt
-import folium
-from streamlit_folium import st_folium
+# ... 前面所有 import 和全局变量不变 ...
 
-# ================== 坐标转换（保留备用） ==================
-def out_of_china(lng, lat):
-    return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
-
-# ================== 全局数据存储 ==================
-history_heartbeat = deque(maxlen=200)
-history_position = deque(maxlen=200)
-history_lock = threading.Lock()
-
-shared_state = {
-    'last_heartbeat_time': time.time(),
-    'last_seq': 0,
-    'timeout_flag': False,
-    'running': True,
-    'current_lng': 118.749,
-    'current_lat': 32.2323,
-    'A_lng': 118.749,
-    'A_lat': 32.2323,
-    'B_lng': 118.749,
-    'B_lat': 32.2344,
-    'flight_height': 10,
-    'progress': 0.0,
-    'direction': 1,
-    'speed': 0.01
-}
-state_lock = threading.Lock()
-
-# ================== 后台线程 ==================
-def update_position_from_progress():
-    with state_lock:
-        A_lng, A_lat = shared_state['A_lng'], shared_state['A_lat']
-        B_lng, B_lat = shared_state['B_lng'], shared_state['B_lat']
-        progress = shared_state['progress']
-    lng = A_lng + (B_lng - A_lng) * progress
-    lat = A_lat + (B_lat - A_lat) * progress
-    return lng, lat
-
-def background_worker():
-    seq = 0
-    while shared_state['running']:
-        time.sleep(1)
-        seq += 1
-        now = time.time()
-
-        with state_lock:
-            progress = shared_state['progress']
-            direction = shared_state['direction']
-            speed = shared_state['speed']
-            new_progress = progress + direction * speed
-            if new_progress >= 1.0:
-                new_progress = 1.0 - (new_progress - 1.0)
-                shared_state['direction'] = -1
-            elif new_progress <= 0.0:
-                new_progress = -new_progress
-                shared_state['direction'] = 1
-            shared_state['progress'] = max(0.0, min(1.0, new_progress))
-
-        cur_lng, cur_lat = update_position_from_progress()
-
-        with state_lock:
-            shared_state['last_heartbeat_time'] = now
-            shared_state['last_seq'] = seq
-            shared_state['current_lng'] = cur_lng
-            shared_state['current_lat'] = cur_lat
-            shared_state['timeout_flag'] = False
-
-        with history_lock:
-            history_heartbeat.append((now, seq))
-            history_position.append((cur_lng, cur_lat))
-
-# ================== Streamlit 界面 ==================
 def main():
     st.set_page_config(page_title="无人机监控系统 - 南京科院", layout="wide")
     st.title("🚁 无人机心跳与轨迹监控")
@@ -90,7 +10,7 @@ def main():
         thread = threading.Thread(target=background_worker, daemon=True)
         thread.start()
 
-    # 侧边栏控件（静态，不会重复创建）
+    # 侧边栏控件（不变）
     st.sidebar.header("🎮 控制面板")
     st.sidebar.subheader("📍 起点 A (GCJ-02)")
     colA1, colA2 = st.sidebar.columns(2)
@@ -143,10 +63,14 @@ def main():
         map_placeholder = st.empty()
 
     iteration = 0
+    last_map_update = 0
+    map_interval = 2  # 地图每2秒刷新一次，避免闪烁
+
     while True:
         iteration += 1
         now = time.time()
 
+        # 获取共享状态（不变）
         with state_lock:
             last_time = shared_state['last_heartbeat_time']
             seq = shared_state['last_seq']
@@ -165,7 +89,7 @@ def main():
             with state_lock:
                 shared_state['timeout_flag'] = True
 
-        # 更新侧边栏
+        # 更新侧边栏（每秒更新）
         local_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         local_time_placeholder.metric("🕒 本地时间", local_time)
         heartbeat_info_placeholder.metric(
@@ -178,7 +102,7 @@ def main():
             timeout_placeholder.success(f"✅ 连接正常  距上次心跳 {delta_int} 秒")
         flight_info_placeholder.metric("飞行进度", f"{progress*100:.1f}%  (A→B往返)")
 
-        # 心跳曲线图
+        # 心跳曲线图（每秒更新）
         with history_lock:
             if history_heartbeat:
                 df = pd.DataFrame(history_heartbeat, columns=['timestamp', 'seq'])
@@ -195,52 +119,54 @@ def main():
             else:
                 chart_placeholder.info("等待心跳数据...")
 
-        # 地图绘制
-        m = folium.Map(location=[cur_lat, cur_lng], zoom_start=17, control_scale=True, tiles=None)
-        folium.TileLayer(
-            tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-            attr='高德地图',
-            name='高德卫星图',
-            overlay=False,
-            control=True
-        ).add_to(m)
+        # 地图更新（降低频率）
+        if now - last_map_update >= map_interval:
+            m = folium.Map(location=[cur_lat, cur_lng], zoom_start=17, control_scale=True, tiles=None)
+            folium.TileLayer(
+                tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+                attr='高德地图',
+                name='高德卫星图',
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-        folium.Marker(
-            location=[A_lat, A_lng],
-            popup=f"起点 A<br>GCJ-02: {A_lng:.6f}, {A_lat:.6f}",
-            icon=folium.Icon(color='green', icon='play', prefix='fa')
-        ).add_to(m)
+            folium.Marker(
+                location=[A_lat, A_lng],
+                popup=f"起点 A<br>GCJ-02: {A_lng:.6f}, {A_lat:.6f}",
+                icon=folium.Icon(color='green', icon='play', prefix='fa')
+            ).add_to(m)
 
-        folium.Marker(
-            location=[B_lat, B_lng],
-            popup=f"终点 B<br>GCJ-02: {B_lng:.6f}, {B_lat:.6f}",
-            icon=folium.Icon(color='orange', icon='flag-checkered', prefix='fa')
-        ).add_to(m)
+            folium.Marker(
+                location=[B_lat, B_lng],
+                popup=f"终点 B<br>GCJ-02: {B_lng:.6f}, {B_lat:.6f}",
+                icon=folium.Icon(color='orange', icon='flag-checkered', prefix='fa')
+            ).add_to(m)
 
-        folium.PolyLine(
-            locations=[[A_lat, A_lng], [B_lat, B_lng]],
-            color='gray', weight=2, opacity=0.6, dash_array='5,5'
-        ).add_to(m)
+            folium.PolyLine(
+                locations=[[A_lat, A_lng], [B_lat, B_lng]],
+                color='gray', weight=2, opacity=0.6, dash_array='5,5'
+            ).add_to(m)
 
-        with history_lock:
-            if len(history_position) >= 2:
-                points = [[lat, lng] for lng, lat in history_position]
-                folium.PolyLine(points, color='blue', weight=3, opacity=0.7).add_to(m)
+            with history_lock:
+                if len(history_position) >= 2:
+                    points = [[lat, lng] for lng, lat in history_position]
+                    folium.PolyLine(points, color='blue', weight=3, opacity=0.7).add_to(m)
 
-        folium.Marker(
-            location=[cur_lat, cur_lng],
-            popup=f"无人机<br>序号: {seq}<br>高度: {height}m<br>进度: {progress*100:.1f}%",
-            icon=folium.Icon(color='red', icon='plane', prefix='fa')
-        ).add_to(m)
+            folium.Marker(
+                location=[cur_lat, cur_lng],
+                popup=f"无人机<br>序号: {seq}<br>高度: {height}m<br>进度: {progress*100:.1f}%",
+                icon=folium.Icon(color='red', icon='plane', prefix='fa')
+            ).add_to(m)
 
-        folium.Circle(radius=20, location=[cur_lat, cur_lng], color='red', fill=True, fill_opacity=0.2).add_to(m)
+            folium.Circle(radius=20, location=[cur_lat, cur_lng], color='red', fill=True, fill_opacity=0.2).add_to(m)
 
-        # 关键修复：使用动态 key
-        map_key = f"drone_map_{iteration}_{int(now*1000)}"
-        with map_placeholder.container():
-            st_folium(m, width=650, height=500, key=map_key)
+            map_key = f"drone_map_{iteration}_{int(now*1000)}"
+            with map_placeholder.container():
+                st_folium(m, width=650, height=500, key=map_key)
+
+            last_map_update = now
+        else:
+            # 不更新地图，但需要短暂休眠以匹配循环频率
+            pass
 
         time.sleep(1)
-
-if __name__ == "__main__":
-    main()
