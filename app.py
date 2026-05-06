@@ -12,15 +12,15 @@ import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 
 # ==================== 配置常量 ====================
-SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 学校中心 (GCJ-02)
+SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 南京科技职业学院中心 (GCJ-02)
 DEFAULT_A_GCJ = [118.746956, 32.232945]      # 默认起点 A
 DEFAULT_B_GCJ = [118.751589, 32.235204]      # 默认终点 B
 
 GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-HEARTBEAT_INTERVAL = 0.2
-BASE_SPEED_MPS = 5.0
+HEARTBEAT_INTERVAL = 0.2   # 心跳间隔（秒）
+BASE_SPEED_MPS = 5.0       # 基础速度 (m/s)
 
-# ==================== 坐标转换（简化） ====================
+# ==================== 坐标转换 ====================
 def wgs84_to_gcj02(lng, lat):
     return lng + 0.006, lat + 0.002
 
@@ -51,8 +51,8 @@ def segments_intersect(p1, p2, p3, p4):
         if abs(val) < 1e-10: return 0
         return 1 if val > 0 else 2
     def on_segment(p, q, r):
-        return (min(p[0],r[0]) <= q[0] <= max(p[0],r[0]) and
-                min(p[1],r[1]) <= q[1] <= max(p[1],r[1]))
+        return (min(p[0], r[0]) <= q[0] <= max(p[0], r[0]) and
+                min(p[1], r[1]) <= q[1] <= max(p[1], r[1]))
     o1 = orientation(p1,p2,p3)
     o2 = orientation(p1,p2,p4)
     o3 = orientation(p3,p4,p1)
@@ -95,9 +95,7 @@ def find_avoidance_path(start, end, obstacles, flight_alt, safety_radius=5):
     max_lng, max_lat, min_lat = -float('inf'), -float('inf'), float('inf')
     for obs in blocking:
         for p in obs.get('polygon',[]):
-            if p[0] > max_lng: max_lng = p[0]
-            if p[1] > max_lat: max_lat = p[1]
-            if p[1] < min_lat: min_lat = p[1]
+            max_lng, max_lat, min_lat = max(max_lng,p[0]), max(max_lat,p[1]), min(min_lat,p[1])
     safe_lng, safe_lat = meters_to_deg(safety_radius*3)
     obs_h = max_lat - min_lat
     p1 = [start[0]+0.0012, max_lat + obs_h*3 + safe_lat*5 + 0.0002]
@@ -439,22 +437,30 @@ def main():
 
         st.markdown("---")
         st.subheader("💓 心跳序号 - 时间关系图")
-        if len(st.session_state.sim.history) >= 2:
-            # 注意 sim.history 是从旧到新
-            flight_times = [h.flight_time for h in st.session_state.sim.history]
-            seqs = list(range(1, len(st.session_state.sim.history)+1))
-            fig, ax = plt.subplots(figsize=(8,4))
-            ax.plot(flight_times, seqs, marker='o', markersize=3, linewidth=2, color='#1f77b4')
-            ax.set_xlabel('飞行时间 (秒)')
-            ax.set_ylabel('心跳包序号')
-            ax.set_title('心跳序号与飞行时间关系（正比例）')
+
+        # ---------- 关键绘图部分 ----------
+        history = st.session_state.sim.history  # 从旧到新的列表
+        if len(history) >= 2:
+            # 提取飞行时间（秒）和序号（从1开始）
+            flight_times = [h.flight_time for h in history]
+            seq_numbers = list(range(1, len(history)+1))
+            
+            # 创建 matplotlib 图形
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.plot(flight_times, seq_numbers, marker='o', markersize=4, linewidth=2, color='#1f77b4')
+            ax.set_xlabel('飞行时间 (秒)', fontsize=12)
+            ax.set_ylabel('心跳包序号', fontsize=12)
+            ax.set_title('心跳序号与飞行时间关系（正比例）', fontsize=14)
             ax.grid(True, linestyle='--', alpha=0.6)
+            # 强制显示坐标轴标签
+            ax.xaxis.set_label_coords(0.5, -0.08)
+            ax.yaxis.set_label_coords(-0.08, 0.5)
             st.pyplot(fig)
             plt.close(fig)
         else:
-            st.info("等待心跳数据...")
-
+            st.info("等待足够的心跳数据（至少2个）...")
         st.markdown("---")
+
         st.subheader("📈 实时数据图表")
         if len(st.session_state.hb_history) > 1:
             col_ch1, col_ch2 = st.columns(2)
