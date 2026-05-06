@@ -22,13 +22,11 @@ GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&
 HEARTBEAT_INTERVAL = 0.2   # 心跳间隔（秒）
 BASE_SPEED_MPS = 5.0       # 基础速度 (m/s)
 
-# ==================== 坐标转换（简化版，实际可替换为精确算法） ====================
+# ==================== 坐标转换（简化版） ====================
 def wgs84_to_gcj02(lng, lat):
-    """WGS-84 转 GCJ-02（演示用简化偏移）"""
     return lng + 0.006, lat + 0.002
 
 def gcj02_to_wgs84(lng, lat):
-    """GCJ-02 转 WGS-84（演示用）"""
     return lng - 0.006, lat - 0.002
 
 # ==================== 几何辅助 & 避障算法 ====================
@@ -138,7 +136,7 @@ class HeartbeatSimulator:
         self.safety_radius = 5
         self.start_time = None
         self.last_update = None
-        self.history = []      # 存储心跳历史用于绘图
+        self.history = []      # 存储心跳历史（从旧到新）
 
     def set_path(self, path, altitude, speed_pct, safety_radius):
         self.path = path
@@ -152,9 +150,13 @@ class HeartbeatSimulator:
         self.traveled = 0.0
         self.start_time = datetime.now()
         self.last_update = None
+        # 清空历史，重新开始
         self.history = []
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        return self._gen_heartbeat(False)
+        # 立即生成初始心跳（进度0）
+        init_hb = self._gen_heartbeat(False)
+        self.history.append(init_hb)
+        return init_hb
 
     def update(self):
         if not self.simulating or self.path_idx >= len(self.path)-1:
@@ -207,8 +209,9 @@ class HeartbeatSimulator:
             arrived=arrived,
             remaining_dist=remain
         )
-        self.history.insert(0, hb)   # 最新在前
-        if len(self.history) > 200: self.history.pop()
+        self.history.append(hb)
+        if len(self.history) > 200:
+            self.history.pop(0)
         return hb
 
 # ==================== 后台线程 ====================
@@ -307,13 +310,12 @@ def main():
         st.checkbox("A点已设", value=a_ok, disabled=True)
         st.checkbox("B点已设", value=b_ok, disabled=True)
 
-        # 飞行公共参数（高度、速度、安全半径）放在侧边栏方便调整
+        # 飞行公共参数（高度、速度、安全半径）放在侧边栏
         st.markdown("---")
         st.subheader("✈️ 飞行参数")
         new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
         if new_alt != st.session_state.flight_alt:
             st.session_state.flight_alt = new_alt
-            # 重新规划路径
             if st.session_state.points.get('A') and st.session_state.points.get('B'):
                 st.session_state.plan_path = find_avoidance_path(
                     st.session_state.points['A'], st.session_state.points['B'],
@@ -329,7 +331,6 @@ def main():
         st.header("🗺️ 航线规划")
         col_map, col_ctrl = st.columns([3,1])
         with col_map:
-            # 自动规划路径
             if st.session_state.plan_path is None and st.session_state.points.get('A') and st.session_state.points.get('B'):
                 st.session_state.plan_path = find_avoidance_path(
                     st.session_state.points['A'], st.session_state.points['B'],
@@ -344,13 +345,12 @@ def main():
             folium_static(m, width=800, height=550)
         with col_ctrl:
             st.subheader("🎮 飞行控制")
-            # 坐标输入辅助函数（根据所选坐标系自动转换存储为GCJ-02）
             def point_input(label, default_gcj):
                 if st.session_state.coord_sys == "GCJ-02":
                     lat = st.number_input(f"{label} 纬度", value=default_gcj[1], format="%.6f", key=f"{label}_lat")
                     lng = st.number_input(f"{label} 经度", value=default_gcj[0], format="%.6f", key=f"{label}_lng")
                     return [lng, lat]
-                else:  # WGS-84
+                else:
                     wgs_lat = st.number_input(f"{label} 纬度 (WGS-84)", value=gcj02_to_wgs84(default_gcj[0],default_gcj[1])[1], format="%.6f", key=f"{label}_wgs_lat")
                     wgs_lng = st.number_input(f"{label} 经度 (WGS-84)", value=gcj02_to_wgs84(default_gcj[0],default_gcj[1])[0], format="%.6f", key=f"{label}_wgs_lng")
                     lng_gcj, lat_gcj = wgs84_to_gcj02(wgs_lng, wgs_lat)
@@ -372,7 +372,6 @@ def main():
                         st.session_state.obstacles, st.session_state.flight_alt, st.session_state.safety_radius)
                     st.rerun()
 
-            # 航线信息
             if st.session_state.points.get('A') and st.session_state.points.get('B'):
                 d = distance(st.session_state.points['A'], st.session_state.points['B']) * 111000
                 st.metric("📏 直线距离", f"{d:.0f} 米")
@@ -406,7 +405,6 @@ def main():
                     st.info("飞行已停止")
                     st.rerun()
 
-            # 显示实时简讯
             if st.session_state.sim_running and st.session_state.latest_hb:
                 hb = st.session_state.latest_hb
                 st.markdown("---")
@@ -417,77 +415,91 @@ def main():
 
     else:  # 飞行监控页面
         st.header("📡 飞行监控 - 实时心跳包")
-        if st.session_state.sim_running and st.session_state.latest_hb:
-            hb = st.session_state.latest_hb
-            # 进度条
-            st.progress(hb.progress, text=f"飞行进度：{int(hb.progress*100)}%")
-
-            # 主要指标卡片
-            cols1 = st.columns(5)
-            with cols1[0]: st.metric("⏰ 飞行时间", f"{hb.flight_time:.1f}s")
-            with cols1[1]: st.metric("📍 当前位置", f"{hb.lat:.6f}, {hb.lng:.6f}")
-            with cols1[2]: st.metric("📏 飞行高度", f"{hb.altitude} m")
-            with cols1[3]: st.metric("💨 当前速度", f"{hb.speed} m/s")
-            with cols1[4]: st.metric("📏 剩余距离", f"{hb.remaining_distance:.0f} m")
-
-            cols2 = st.columns(4)
-            with cols2[0]: st.metric("🔋 电池电压", f"{hb.voltage} V")
-            with cols2[1]: st.metric("🛰️ 卫星数量", f"{hb.satellites} 颗")
-            with cols2[2]: st.metric("🎯 任务进度", f"{int(hb.progress*100)}%")
-            with cols2[3]: st.metric("🛡️ 安全半径", f"{st.session_state.safety_radius} m")
-
-            if hb.arrived:
-                st.success("🎉 无人机已到达目的地！")
-
-            st.markdown("---")
-            st.subheader("💓 心跳序号 - 时间关系图")
-            # 绘制心跳序号 vs 飞行时间（秒）的正比例直线
-            if len(st.session_state.sim.history) >= 2:
-                # 注意 history 是最新在前，我们需要时间从小到大
-                hist_list = st.session_state.sim.history[::-1]   # 从旧到新
-                flight_times = [h.flight_time for h in hist_list]
-                seqs = list(range(1, len(hist_list)+1))   # 序号从1开始递增
-                fig, ax = plt.subplots(figsize=(8,4))
-                ax.plot(flight_times, seqs, marker='o', markersize=3, linewidth=2, color='#1f77b4')
-                ax.set_xlabel('飞行时间 (秒)')
-                ax.set_ylabel('心跳包序号')
-                ax.set_title('心跳序号与飞行时间关系（正比例）')
-                ax.grid(True, linestyle='--', alpha=0.6)
-                st.pyplot(fig)
-                plt.close(fig)
-            else:
-                st.info("等待心跳数据...")
-
-            st.markdown("---")
-            st.subheader("📈 实时数据图表")
-            if len(st.session_state.hb_history) > 1:
-                col_ch1, col_ch2 = st.columns(2)
-                with col_ch1:
-                    alt_df = pd.DataFrame([{"时间": i, "高度(m)": h.altitude} for i, h in enumerate(st.session_state.hb_history[:50])])
-                    st.line_chart(alt_df, x="时间", y="高度(m)")
-                with col_ch2:
-                    spd_df = pd.DataFrame([{"时间": i, "速度(m/s)": h.speed} for i, h in enumerate(st.session_state.hb_history[:50])])
-                    st.line_chart(spd_df, x="时间", y="速度(m/s)")
-            else:
-                st.info("等待更多数据...")
-
-            st.subheader("📋 飞行日志")
-            if st.session_state.hb_history:
-                log = []
-                for h in st.session_state.hb_history[:20]:
-                    log.append({
-                        "时间": h.timestamp, "飞行时间(s)": f"{h.flight_time:.1f}",
-                        "纬度": f"{h.lat:.6f}", "经度": f"{h.lng:.6f}",
-                        "高度(m)": h.altitude, "速度(m/s)": h.speed,
-                        "电压(V)": h.voltage, "卫星数": h.satellites
-                    })
-                st.dataframe(pd.DataFrame(log), use_container_width=True)
-            else:
-                st.info("暂无飞行数据")
+        # 自动刷新机制：每秒刷新一次页面，更新监控数据
+        if st.session_state.sim_running:
+            # 使用一个空的占位符来实现自动刷新（不重建整个页面的大开销）
+            refresh_placeholder = st.empty()
+            if refresh_placeholder.button("🔄 手动刷新", key="manual_refresh"):
+                st.rerun()
+            # 自动刷新：利用 time.sleep 后 rerun，但不应该阻塞，所以使用 st.experimental_rerun
+            # 但为了避免阻塞，使用 JavaScript 定时器？简单做法：time.sleep(1) 然后 rerun
+            # 注意：在脚本执行过程中调用 time.sleep 会阻塞，但只会影响当前请求，不会卡死其他用户。
+            # 由于 Streamlit 每次运行脚本是单次请求，所以这里可以接受。
+            import time
+            time.sleep(1)
+            st.rerun()
         else:
+            # 未飞行时，显示静态提示
             st.info("⏳ 等待心跳数据... 请在「航线规划」页面点击「开始飞行」")
-            st.markdown("---")
-            st.info("💡 提示：先设置起点/终点，然后点击「开始飞行」")
+            st.stop()
+
+        # 以下代码仅在飞行中执行，确保有 latest_hb
+        if st.session_state.latest_hb is None:
+            st.warning("尚未收到心跳，请稍候...")
+            st.stop()
+
+        hb = st.session_state.latest_hb
+        st.progress(hb.progress, text=f"飞行进度：{int(hb.progress*100)}%")
+
+        cols1 = st.columns(5)
+        with cols1[0]: st.metric("⏰ 飞行时间", f"{hb.flight_time:.1f}s")
+        with cols1[1]: st.metric("📍 当前位置", f"{hb.lat:.6f}, {hb.lng:.6f}")
+        with cols1[2]: st.metric("📏 飞行高度", f"{hb.altitude} m")
+        with cols1[3]: st.metric("💨 当前速度", f"{hb.speed} m/s")
+        with cols1[4]: st.metric("📏 剩余距离", f"{hb.remaining_distance:.0f} m")
+
+        cols2 = st.columns(4)
+        with cols2[0]: st.metric("🔋 电池电压", f"{hb.voltage} V")
+        with cols2[1]: st.metric("🛰️ 卫星数量", f"{hb.satellites} 颗")
+        with cols2[2]: st.metric("🎯 任务进度", f"{int(hb.progress*100)}%")
+        with cols2[3]: st.metric("🛡️ 安全半径", f"{st.session_state.safety_radius} m")
+
+        if hb.arrived:
+            st.success("🎉 无人机已到达目的地！")
+
+        st.markdown("---")
+        st.subheader("💓 心跳序号 - 时间关系图")
+        if len(st.session_state.sim.history) >= 2:
+            # history 是从旧到新
+            flight_times = [h.flight_time for h in st.session_state.sim.history]
+            seqs = list(range(1, len(st.session_state.sim.history)+1))
+            fig, ax = plt.subplots(figsize=(8,4))
+            ax.plot(flight_times, seqs, marker='o', markersize=3, linewidth=2, color='#1f77b4')
+            ax.set_xlabel('飞行时间 (秒)')
+            ax.set_ylabel('心跳包序号')
+            ax.set_title('心跳序号与飞行时间关系（正比例）')
+            ax.grid(True, linestyle='--', alpha=0.6)
+            st.pyplot(fig)
+            plt.close(fig)
+        else:
+            st.info("等待心跳数据...")
+
+        st.markdown("---")
+        st.subheader("📈 实时数据图表")
+        if len(st.session_state.hb_history) > 1:
+            col_ch1, col_ch2 = st.columns(2)
+            with col_ch1:
+                alt_df = pd.DataFrame([{"时间": i, "高度(m)": h.altitude} for i, h in enumerate(st.session_state.hb_history[:50])])
+                st.line_chart(alt_df, x="时间", y="高度(m)")
+            with col_ch2:
+                spd_df = pd.DataFrame([{"时间": i, "速度(m/s)": h.speed} for i, h in enumerate(st.session_state.hb_history[:50])])
+                st.line_chart(spd_df, x="时间", y="速度(m/s)")
+        else:
+            st.info("等待更多数据...")
+
+        st.subheader("📋 飞行日志")
+        if st.session_state.hb_history:
+            log = []
+            for h in st.session_state.hb_history[:20]:
+                log.append({
+                    "时间": h.timestamp, "飞行时间(s)": f"{h.flight_time:.1f}",
+                    "纬度": f"{h.lat:.6f}", "经度": f"{h.lng:.6f}",
+                    "高度(m)": h.altitude, "速度(m/s)": h.speed,
+                    "电压(V)": h.voltage, "卫星数": h.satellites
+                })
+            st.dataframe(pd.DataFrame(log), use_container_width=True)
+        else:
+            st.info("暂无飞行数据")
 
 if __name__ == "__main__":
     main()
