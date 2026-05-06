@@ -9,37 +9,32 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import matplotlib.pyplot as plt
+from streamlit_autorefresh import st_autorefresh
 
 # ==================== 配置常量 ====================
 SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 南京科技职业学院中心 (GCJ-02)
 DEFAULT_A_GCJ = [118.746956, 32.232945]      # 默认起点 A (GCJ-02)
 DEFAULT_B_GCJ = [118.751589, 32.235204]      # 默认终点 B (GCJ-02)
 
-# 高德卫星地图瓦片 URL
 GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
+HEARTBEAT_INTERVAL = 0.2
+BASE_SPEED_MPS = 5.0
 
-# 心跳模拟参数
-HEARTBEAT_INTERVAL = 0.2   # 心跳间隔（秒）
-BASE_SPEED_MPS = 5.0       # 基础速度 (m/s)
-
-# ==================== 坐标转换（简化版） ====================
+# ==================== 坐标转换 ====================
 def wgs84_to_gcj02(lng, lat):
     return lng + 0.006, lat + 0.002
 
 def gcj02_to_wgs84(lng, lat):
     return lng - 0.006, lat - 0.002
 
-# ==================== 几何辅助 & 避障算法 ====================
-def distance(p1: List[float], p2: List[float]) -> float:
+# ==================== 几何 & 避障 ====================
+def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-def calculate_path_length(path: List[List[float]]) -> float:
-    total = 0.0
-    for i in range(len(path)-1):
-        total += distance(path[i], path[i+1])
-    return total
+def calculate_path_length(path):
+    return sum(distance(path[i], path[i+1]) for i in range(len(path)-1))
 
-def point_in_polygon(point: List[float], polygon: List[List[float]]) -> bool:
+def point_in_polygon(point, polygon):
     x, y = point
     inside = False
     n = len(polygon)
@@ -136,7 +131,7 @@ class HeartbeatSimulator:
         self.safety_radius = 5
         self.start_time = None
         self.last_update = None
-        self.history = []      # 存储心跳历史（从旧到新）
+        self.history = []      # 从旧到新
 
     def set_path(self, path, altitude, speed_pct, safety_radius):
         self.path = path
@@ -150,10 +145,8 @@ class HeartbeatSimulator:
         self.traveled = 0.0
         self.start_time = datetime.now()
         self.last_update = None
-        # 清空历史，重新开始
         self.history = []
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        # 立即生成初始心跳（进度0）
         init_hb = self._gen_heartbeat(False)
         self.history.append(init_hb)
         return init_hb
@@ -231,7 +224,7 @@ def background_worker():
                 if hb.arrived:
                     st.session_state.sim_running = False
 
-# ==================== 地图创建（航线规划使用） ====================
+# ==================== 地图创建 ====================
 def create_planning_map(center, points, obstacles, flight_trail, plan_path, drone_pos, safety_r, alt):
     m = folium.Map(location=[center[1],center[0]], zoom_start=16, tiles=GAODE_SATELLITE_URL, attr='高德卫星')
     for obs in obstacles:
@@ -287,12 +280,10 @@ def main():
     st.title("🏫 南京科技职业学院 - 无人机地面站系统")
     init_state()
 
-    # 启动后台线程（仅一次）
     if 'worker_started' not in st.session_state:
         st.session_state.worker_started = True
         threading.Thread(target=background_worker, daemon=True).start()
 
-    # ========== 侧边栏 ==========
     with st.sidebar:
         st.header("📌 导航")
         selected_page = st.radio("功能页面", ["航线规划", "飞行监控"], index=0 if st.session_state.page=="航线规划" else 1)
@@ -310,7 +301,6 @@ def main():
         st.checkbox("A点已设", value=a_ok, disabled=True)
         st.checkbox("B点已设", value=b_ok, disabled=True)
 
-        # 飞行公共参数（高度、速度、安全半径）放在侧边栏
         st.markdown("---")
         st.subheader("✈️ 飞行参数")
         new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
@@ -326,7 +316,6 @@ def main():
         new_rad = st.slider("安全半径 (米)", 1, 20, st.session_state.safety_radius, 1)
         st.session_state.safety_radius = new_rad
 
-    # ========== 根据页面显示不同内容 ==========
     if st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划")
         col_map, col_ctrl = st.columns([3,1])
@@ -415,27 +404,15 @@ def main():
 
     else:  # 飞行监控页面
         st.header("📡 飞行监控 - 实时心跳包")
-        # 自动刷新机制：每秒刷新一次页面，更新监控数据
-        if st.session_state.sim_running:
-            # 使用一个空的占位符来实现自动刷新（不重建整个页面的大开销）
-            refresh_placeholder = st.empty()
-            if refresh_placeholder.button("🔄 手动刷新", key="manual_refresh"):
-                st.rerun()
-            # 自动刷新：利用 time.sleep 后 rerun，但不应该阻塞，所以使用 st.experimental_rerun
-            # 但为了避免阻塞，使用 JavaScript 定时器？简单做法：time.sleep(1) 然后 rerun
-            # 注意：在脚本执行过程中调用 time.sleep 会阻塞，但只会影响当前请求，不会卡死其他用户。
-            # 由于 Streamlit 每次运行脚本是单次请求，所以这里可以接受。
-            import time
-            time.sleep(1)
-            st.rerun()
-        else:
-            # 未飞行时，显示静态提示
+        # 添加自动刷新组件，每秒刷新一次（不影响地图页面）
+        st_autorefresh(interval=1000, key="monitor_refresh")
+
+        if not st.session_state.sim_running:
             st.info("⏳ 等待心跳数据... 请在「航线规划」页面点击「开始飞行」")
             st.stop()
 
-        # 以下代码仅在飞行中执行，确保有 latest_hb
         if st.session_state.latest_hb is None:
-            st.warning("尚未收到心跳，请稍候...")
+            st.warning("正在等待第一个心跳包...")
             st.stop()
 
         hb = st.session_state.latest_hb
@@ -460,7 +437,6 @@ def main():
         st.markdown("---")
         st.subheader("💓 心跳序号 - 时间关系图")
         if len(st.session_state.sim.history) >= 2:
-            # history 是从旧到新
             flight_times = [h.flight_time for h in st.session_state.sim.history]
             seqs = list(range(1, len(st.session_state.sim.history)+1))
             fig, ax = plt.subplots(figsize=(8,4))
