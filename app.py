@@ -1,6 +1,6 @@
 import streamlit as st
 import folium
-from streamlit_folium import st_folium
+from streamlit_folium import folium_static  # 使用 folium_static 替代 st_folium
 import time
 import threading
 import random
@@ -8,8 +8,6 @@ import math
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import pandas as pd
-import json
-import os
 
 # ==================== 配置常量 ====================
 SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 南京科技职业学院中心
@@ -232,7 +230,7 @@ def background_worker():
                 if hb.arrived:
                     st.session_state.simulation_running = False
 
-# ==================== 地图创建（无 Draw 插件） ====================
+# ==================== 地图创建（无任何插件，仅基本元素） ====================
 def create_planning_map(center, points, obstacles, flight_trail, planned_path, 
                         drone_pos, safety_radius, flight_altitude):
     m = folium.Map(
@@ -241,6 +239,7 @@ def create_planning_map(center, points, obstacles, flight_trail, planned_path,
         tiles=GAODE_SATELLITE_URL,
         attr='高德卫星地图'
     )
+    # 绘制障碍物
     for obs in obstacles:
         coords = obs.get('polygon', [])
         height = obs.get('height', 30)
@@ -251,24 +250,29 @@ def create_planning_map(center, points, obstacles, flight_trail, planned_path,
                 color=color, weight=3, fill=True, fill_color=color, fill_opacity=0.4,
                 popup=f"🚧 {obs.get('name')}\n高度: {height}m"
             ).add_to(m)
+    # 绘制起点终点
     if points.get('A'):
         folium.Marker([points['A'][1], points['A'][0]], popup="🟢 起点 A",
                       icon=folium.Icon(color="green", icon="play", prefix="fa")).add_to(m)
     if points.get('B'):
         folium.Marker([points['B'][1], points['B'][0]], popup="🔴 终点 B",
                       icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa")).add_to(m)
+    # 规划路径
     if planned_path and len(planned_path) > 1:
         path_locations = [[p[1], p[0]] for p in planned_path]
         folium.PolyLine(path_locations, color="green", weight=5, opacity=0.8, popup="规划航线").add_to(m)
         for i, point in enumerate(planned_path[1:-1]):
             folium.CircleMarker([point[1], point[0]], radius=5, color="green", fill=True,
                                 fill_color="white", popup=f"航点 {i+1}").add_to(m)
+    # 直线连线（仅供参考）
     if points.get('A') and points.get('B'):
         folium.PolyLine([[points['A'][1], points['A'][0]], [points['B'][1], points['B'][0]]],
                         color="gray", weight=2, opacity=0.5, dash_array='5, 5', popup="直线航线").add_to(m)
+    # 历史轨迹
     if flight_trail and len(flight_trail) > 1:
         trail_locations = [[lat, lng] for lng, lat in flight_trail[-50:]]
         folium.PolyLine(trail_locations, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
+    # 无人机当前位置
     if drone_pos:
         folium.Marker([drone_pos[1], drone_pos[0]], popup="✈️ 无人机",
                       icon=folium.Icon(color="blue", icon="plane", prefix="fa")).add_to(m)
@@ -284,6 +288,7 @@ def create_monitor_map(center, latest, obstacles, planned_path, flight_trail, sa
         tiles=GAODE_SATELLITE_URL,
         attr='高德卫星地图'
     )
+    # 障碍物
     for obs in obstacles:
         coords = obs.get('polygon', [])
         height = obs.get('height', 30)
@@ -291,21 +296,26 @@ def create_monitor_map(center, latest, obstacles, planned_path, flight_trail, sa
             color = "red" if height > flight_altitude else "orange"
             folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2,
                            fill=True, fill_opacity=0.3, popup=f"🚧 {obs.get('name')}\n高度: {height}m").add_to(m)
+    # 规划路径
     if planned_path and len(planned_path) > 1:
         path_locations = [[p[1], p[0]] for p in planned_path]
         folium.PolyLine(path_locations, color="green", weight=3, opacity=0.7, popup="规划航线").add_to(m)
+    # 历史轨迹
     if flight_trail and len(flight_trail) > 1:
         trail_locations = [[lat, lng] for lng, lat in flight_trail[-100:]]
         folium.PolyLine(trail_locations, color="orange", weight=2, opacity=0.6, popup="历史轨迹").add_to(m)
+    # 安全半径
     folium.Circle(radius=safety_radius, location=[latest.lat, latest.lng],
                   color="blue", weight=2, fill=True, fill_color="blue", fill_opacity=0.2,
                   popup=f"安全半径: {safety_radius}米").add_to(m)
+    # 起点终点
     if st.session_state.points_gcj.get('A'):
         folium.Marker([st.session_state.points_gcj['A'][1], st.session_state.points_gcj['A'][0]],
                       popup="起点 A", icon=folium.Icon(color='green', icon='play', prefix='fa')).add_to(m)
     if st.session_state.points_gcj.get('B'):
         folium.Marker([st.session_state.points_gcj['B'][1], st.session_state.points_gcj['B'][0]],
                       popup="终点 B", icon=folium.Icon(color='red', icon='flag-checkered', prefix='fa')).add_to(m)
+    # 无人机当前
     folium.Marker([latest.lat, latest.lng], popup=f"当前位置\n高度: {latest.altitude}m\n速度: {latest.speed}m/s",
                   icon=folium.Icon(color='red', icon='plane', prefix='fa')).add_to(m)
     return m
@@ -408,7 +418,7 @@ def main():
                 SCHOOL_CENTER_GCJ, st.session_state.points_gcj, st.session_state.obstacles_gcj,
                 st.session_state.flight_trail, st.session_state.planned_path, drone_pos,
                 st.session_state.safety_radius, st.session_state.flight_altitude)
-            st_folium(m, width=800, height=550)
+            folium_static(m, width=800, height=550)   # 替换为 folium_static
         with col_info:
             st.subheader("🎮 飞行控制")
             a, b = st.session_state.points_gcj['A'], st.session_state.points_gcj['B']
@@ -474,7 +484,7 @@ def main():
                 SCHOOL_CENTER_GCJ, hb, st.session_state.obstacles_gcj,
                 st.session_state.planned_path, st.session_state.flight_trail,
                 st.session_state.safety_radius, st.session_state.flight_altitude)
-            st_folium(monitor_map, width=900, height=500)
+            folium_static(monitor_map, width=900, height=500)   # 替换为 folium_static
             st.markdown("---")
             st.subheader("📈 实时数据图表")
             if len(st.session_state.heartbeat_history) > 1:
