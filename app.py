@@ -12,22 +12,22 @@ import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 
 # ==================== 配置常量 ====================
-SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 南京科技职业学院中心 (GCJ-02)
-DEFAULT_A_GCJ = [118.746956, 32.232945]      # 默认起点 A (GCJ-02)
-DEFAULT_B_GCJ = [118.751589, 32.235204]      # 默认终点 B (GCJ-02)
+SCHOOL_CENTER_GCJ = [118.749413, 32.234097]  # 学校中心 (GCJ-02)
+DEFAULT_A_GCJ = [118.746956, 32.232945]      # 默认起点 A
+DEFAULT_B_GCJ = [118.751589, 32.235204]      # 默认终点 B
 
 GAODE_SATELLITE_URL = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED_MPS = 5.0
 
-# ==================== 坐标转换 ====================
+# ==================== 坐标转换（简化） ====================
 def wgs84_to_gcj02(lng, lat):
     return lng + 0.006, lat + 0.002
 
 def gcj02_to_wgs84(lng, lat):
     return lng - 0.006, lat - 0.002
 
-# ==================== 几何 & 避障 ====================
+# ==================== 几何辅助 & 避障 ====================
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
@@ -95,7 +95,9 @@ def find_avoidance_path(start, end, obstacles, flight_alt, safety_radius=5):
     max_lng, max_lat, min_lat = -float('inf'), -float('inf'), float('inf')
     for obs in blocking:
         for p in obs.get('polygon',[]):
-            max_lng, max_lat, min_lat = max(max_lng,p[0]), max(max_lat,p[1]), min(min_lat,p[1])
+            if p[0] > max_lng: max_lng = p[0]
+            if p[1] > max_lat: max_lat = p[1]
+            if p[1] < min_lat: min_lat = p[1]
     safe_lng, safe_lat = meters_to_deg(safety_radius*3)
     obs_h = max_lat - min_lat
     p1 = [start[0]+0.0012, max_lat + obs_h*3 + safe_lat*5 + 0.0002]
@@ -131,7 +133,7 @@ class HeartbeatSimulator:
         self.safety_radius = 5
         self.start_time = None
         self.last_update = None
-        self.history = []      # 从旧到新
+        self.history = []      # 存储所有心跳（从旧到新）
 
     def set_path(self, path, altitude, speed_pct, safety_radius):
         self.path = path
@@ -147,7 +149,8 @@ class HeartbeatSimulator:
         self.last_update = None
         self.history = []
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        init_hb = self._gen_heartbeat(False)
+        # 生成初始心跳
+        init_hb = self._generate_heartbeat(False)
         self.history.append(init_hb)
         return init_hb
 
@@ -177,16 +180,16 @@ class HeartbeatSimulator:
                 self.current_pos = self.path[self.path_idx].copy()
             else:
                 self.simulating = False
-                return self._gen_heartbeat(True)
+                return self._generate_heartbeat(True)
         else:
             if seg_dist > 0:
                 t = max(0, min(1, self.traveled/seg_dist))
                 lng = start[0] + (end[0]-start[0])*t
                 lat = start[1] + (end[1]-start[1])*t
                 self.current_pos = [lng, lat]
-        return self._gen_heartbeat(False)
+        return self._generate_heartbeat(False)
 
-    def _gen_heartbeat(self, arrived):
+    def _generate_heartbeat(self, arrived):
         flight_t = (datetime.now()-self.start_time).total_seconds() if self.start_time else 0
         remain = max(0, self.total_dist - self.traveled) * 111000
         hb = HeartbeatData(
@@ -226,7 +229,7 @@ def background_worker():
 
 # ==================== 地图创建 ====================
 def create_planning_map(center, points, obstacles, flight_trail, plan_path, drone_pos, safety_r, alt):
-    m = folium.Map(location=[center[1],center[0]], zoom_start=16, tiles=GAODE_SATELLITE_URL, attr='高德卫星')
+    m = folium.Map(location=[center[1], center[0]], zoom_start=16, tiles=GAODE_SATELLITE_URL, attr='高德卫星')
     for obs in obstacles:
         coords = obs.get('polygon',[])
         h = obs.get('height',30)
@@ -404,7 +407,7 @@ def main():
 
     else:  # 飞行监控页面
         st.header("📡 飞行监控 - 实时心跳包")
-        # 添加自动刷新组件，每秒刷新一次（不影响地图页面）
+        # 自动刷新：每秒刷新一次（不影响地图页面）
         st_autorefresh(interval=1000, key="monitor_refresh")
 
         if not st.session_state.sim_running:
@@ -437,6 +440,7 @@ def main():
         st.markdown("---")
         st.subheader("💓 心跳序号 - 时间关系图")
         if len(st.session_state.sim.history) >= 2:
+            # 注意 sim.history 是从旧到新
             flight_times = [h.flight_time for h in st.session_state.sim.history]
             seqs = list(range(1, len(st.session_state.sim.history)+1))
             fig, ax = plt.subplots(figsize=(8,4))
