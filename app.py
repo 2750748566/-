@@ -18,11 +18,12 @@ BASE_SPEED = 5.0            # 基础速度 m/s
 
 # ------------------------------- 心跳模拟器 ---------------------------------
 class HeartbeatData:
-    def __init__(self, flight_time, seq, lat, lng):
+    def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
         self.seq = seq
         self.lat = lat
         self.lng = lng
+        self.altitude = altitude
 
 class HeartbeatSim:
     def __init__(self, start_point):
@@ -35,7 +36,7 @@ class HeartbeatSim:
         self.traveled = 0.0
         self.start_time = None
         self.last_update = None
-        self.history = []
+        self.history = []          # 按时间顺序存储心跳
         self.speed_pct = 50
         self.altitude = 50
 
@@ -52,13 +53,14 @@ class HeartbeatSim:
         self.speed_pct = speed_pct
         self.altitude = altitude
         self.total_dist = sum(math.dist(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        self._add_heartbeat(seq=1)
+        # 立即生成第1个心跳，并返回
+        return self._add_heartbeat(seq=1)
 
     def _add_heartbeat(self, seq=None):
         flight_t = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
         if seq is None:
             seq = len(self.history) + 1
-        hb = HeartbeatData(flight_t, seq, self.current_pos[1], self.current_pos[0])
+        hb = HeartbeatData(flight_t, seq, self.current_pos[1], self.current_pos[0], self.altitude)
         self.history.append(hb)
         return hb
 
@@ -88,7 +90,7 @@ class HeartbeatSim:
                 self.current_pos = self.path[self.path_idx][:]
             else:
                 self.running = False
-                return self._add_heartbeat()
+                return self._add_heartbeat()   # 最后一个心跳
         else:
             if seg_len > 0:
                 t = max(0, min(1, self.traveled / seg_len))
@@ -105,6 +107,7 @@ def bg_worker():
             hb = st.session_state.sim.update()
             if hb:
                 st.session_state.latest_hb = hb
+                # 保持最新心跳在前，用于监控页面展示
                 st.session_state.hb_list.insert(0, hb)
                 if len(st.session_state.hb_list) > 200:
                     st.session_state.hb_list.pop()
@@ -142,7 +145,7 @@ def init():
         'plan_path': None,
         'flight_alt': 50,
         'drone_speed': 50,
-        'coord_sys': 'GCJ-02',   # 坐标系
+        'coord_sys': 'GCJ-02',
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -159,7 +162,7 @@ def main():
         st.session_state.worker_started = True
         threading.Thread(target=bg_worker, daemon=True).start()
 
-    # 侧边栏（导航 + 系统状态）
+    # 侧边栏
     with st.sidebar:
         st.header("📌 导航")
         st.session_state.page = st.radio("功能页面", ["航线规划", "飞行监控"])
@@ -169,7 +172,6 @@ def main():
         st.checkbox("A点已设", value=st.session_state.points.get('A') is not None, disabled=True)
         st.checkbox("B点已设", value=st.session_state.points.get('B') is not None, disabled=True)
 
-        # 坐标系设置（可选，根据图示可能不需要，但保留）
         st.markdown("---")
         st.subheader("🗺️ 坐标系设置")
         coord_choice = st.radio("输入坐标系", ["WGS-84", "GCJ-02(高德/百度)"],
@@ -179,10 +181,8 @@ def main():
     # ========================= 航线规划页面 =========================
     if st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划")
-        # 左右布局：左侧地图，右侧控制面板
         col_map, col_panel = st.columns([3, 1.2])
 
-        # 右侧控制面板
         with col_panel:
             st.markdown("### 🎮 控制面板")
             st.markdown("#### 📍 起点 A")
@@ -224,10 +224,13 @@ def main():
                     b = st.session_state.points.get('B')
                     if a and b:
                         path = [a, b]
-                        st.session_state.sim.set_path(path, st.session_state.flight_alt, st.session_state.drone_speed)
+                        # 设置路径并获取初始心跳
+                        init_hb = st.session_state.sim.set_path(path, st.session_state.flight_alt, st.session_state.drone_speed)
+                        # 立即将初始心跳存入 session_state
+                        st.session_state.latest_hb = init_hb
+                        st.session_state.hb_list = [init_hb]   # 重置历史
+                        st.session_state.flight_trail = [[init_hb.lng, init_hb.lat]]
                         st.session_state.sim_running = True
-                        st.session_state.hb_list = []
-                        st.session_state.flight_trail = []
                         st.success("飞行已开始，请切换至「飞行监控」查看心跳图像")
                         st.rerun()
                     else:
@@ -244,7 +247,6 @@ def main():
                 st.metric("实时进度", f"{st.session_state.sim.progress*100:.1f}%")
                 st.metric("当前心跳序号", hb.seq)
 
-        # 左侧地图
         with col_map:
             if st.session_state.plan_path is None and st.session_state.points.get('A') and st.session_state.points.get('B'):
                 st.session_state.plan_path = [st.session_state.points['A'], st.session_state.points['B']]
@@ -258,6 +260,7 @@ def main():
     # ========================= 飞行监控页面 =========================
     else:
         st.header("📡 飞行监控 - 实时心跳包")
+        # 每秒自动刷新页面
         st_autorefresh(interval=1000, key="monitor")
 
         if not st.session_state.sim_running:
@@ -265,7 +268,10 @@ def main():
             st.stop()
 
         if st.session_state.latest_hb is None:
-            st.warning("等待第一个心跳...")
+            st.warning("正在生成第一个心跳... 请稍候 (页面将自动刷新)")
+            # 主动再次刷新以尽快获取数据
+            time.sleep(0.2)
+            st.rerun()
             st.stop()
 
         hb = st.session_state.latest_hb
@@ -287,12 +293,12 @@ def main():
             ax.plot(times, seqs, marker='o', markersize=4, linewidth=2, color='#1f77b4')
             ax.set_xlabel('飞行时间 (秒)', fontsize=12)
             ax.set_ylabel('心跳包序号', fontsize=12)
-            ax.set_title('心跳序号与飞行时间关系（斜率 ≈ 1/心跳间隔）', fontsize=14)
+            ax.set_title('心跳序号与飞行时间关系（斜率 = 1/心跳间隔）', fontsize=14)
             ax.grid(True, linestyle='--', alpha=0.6)
             st.pyplot(fig)
             plt.close(fig)
         else:
-            st.info("等待更多心跳数据...")
+            st.info("等待更多心跳数据... (至少需要2个心跳)")
 
         st.markdown("---")
         st.subheader("📈 实时趋势")
