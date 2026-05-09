@@ -9,16 +9,16 @@ import folium
 from streamlit_folium import folium_static
 
 # ------------------------------- 配置 ---------------------------------
-SCHOOL_CENTER = [118.749413, 32.234097]          # 南京科技职业学院中心
+SCHOOL_CENTER = [118.749413, 32.234097]
 GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-HEARTBEAT_INTERVAL = 0.2                         # 心跳间隔（秒）
-BASE_SPEED = 5.0                                 # 基础速度 (m/s)
+HEARTBEAT_INTERVAL = 0.2
+BASE_SPEED = 5.0
 
-# ------------------------------- 心跳数据类 -------------------------------
+# ------------------------------- 心跳模拟器 ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
-        self.flight_time = flight_time   # 飞行时间（秒）
-        self.seq = seq                   # 心跳序号
+        self.flight_time = flight_time
+        self.seq = seq
         self.lat = lat
         self.lng = lng
         self.altitude = altitude
@@ -34,12 +34,11 @@ class HeartbeatSim:
         self.traveled = 0.0
         self.start_time = None
         self.last_update = None
-        self.history = []                # 存储所有心跳（按生成顺序）
+        self.history = []
         self.speed_pct = 50
         self.altitude = 50
 
     def set_path(self, path, altitude, speed_pct):
-        """设置飞行路径并立即开始"""
         self.path = path[:]
         self.path_idx = 0
         self.current_pos = path[0][:]
@@ -52,11 +51,10 @@ class HeartbeatSim:
         self.speed_pct = speed_pct
         self.altitude = altitude
         self.total_dist = sum(math.dist(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        # 生成第一个心跳（序号1）
+        # 立即生成第一个心跳（序号1）
         self._add_heartbeat(seq=1)
 
     def _add_heartbeat(self, seq=None):
-        """生成一个心跳并加入历史"""
         flight_t = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
         if seq is None:
             seq = len(self.history) + 1
@@ -64,8 +62,8 @@ class HeartbeatSim:
         self.history.append(hb)
         return hb
 
-    def update_once(self):
-        """推进一次心跳模拟（时间步长为 HEARTBEAT_INTERVAL）"""
+    def update_one_step(self):
+        """推进一个心跳步长，返回新生成的心跳（如果没有则返回None）"""
         if not self.running:
             return None
         now = time.time()
@@ -84,7 +82,6 @@ class HeartbeatSim:
         if self.total_dist > 0:
             self.progress = min(1.0, self.traveled / self.total_dist)
 
-        # 是否到达当前段终点
         if self.traveled >= seg_len and self.traveled > 0:
             self.path_idx += 1
             self.traveled = 0
@@ -92,7 +89,7 @@ class HeartbeatSim:
                 self.current_pos = self.path[self.path_idx][:]
             else:
                 self.running = False
-                return self._add_heartbeat()   # 最后的心跳
+                return self._add_heartbeat()
         else:
             if seg_len > 0:
                 t = max(0, min(1, self.traveled / seg_len))
@@ -101,17 +98,15 @@ class HeartbeatSim:
                 self.current_pos = [lng, lat]
         return self._add_heartbeat()
 
-# ------------------------------- 后台线程（持续驱动飞行） -------------------------------
+# ------------------------------- 后台线程 -------------------------------
 def background_worker():
     while True:
         time.sleep(HEARTBEAT_INTERVAL)
-        # 只有在飞行开始标志为 True 时才更新
         if st.session_state.get('flight_started', False):
             sim = st.session_state.get('sim')
             if sim and sim.running:
-                new_hb = sim.update_once()
+                new_hb = sim.update_one_step()
                 if new_hb:
-                    # 更新最新心跳和轨迹（用于地图显示）
                     st.session_state.latest_hb = new_hb
                     st.session_state.hb_list.insert(0, new_hb)
                     if len(st.session_state.hb_list) > 200:
@@ -122,7 +117,7 @@ def background_worker():
                     if not sim.running:
                         st.session_state.flight_started = False
 
-# ------------------------------- 地图创建（规划页面）--------------------------------
+# ------------------------------- 地图创建 ---------------------------------
 def make_planning_map(center, points, flight_trail, plan_path, drone_pos, alt):
     m = folium.Map(location=[center[1], center[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
     if points.get('A'):
@@ -137,13 +132,13 @@ def make_planning_map(center, points, flight_trail, plan_path, drone_pos, alt):
         folium.Marker([drone_pos[1], drone_pos[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
     return m
 
-# ------------------------------- 初始化 session_state -------------------------------
+# ------------------------------- 初始化状态 -------------------------------
 def init():
     defaults = {
-        'page': '航线规划',                     # 当前页面
+        'page': '航线规划',
         'points': {'A': [118.746956, 32.232945], 'B': [118.751589, 32.235204]},
         'sim': HeartbeatSim([118.746956, 32.232945]),
-        'flight_started': False,               # 是否正在飞行
+        'flight_started': False,
         'latest_hb': None,
         'hb_list': [],
         'flight_trail': [],
@@ -156,7 +151,6 @@ def init():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # 启动后台线程（仅一次）
     if not st.session_state.bg_thread_started:
         thread = threading.Thread(target=background_worker, daemon=True)
         thread.start()
@@ -168,7 +162,6 @@ def main():
     st.title("🏫 南京科技职业学院 - 无人机地面站 (心跳正比例图像)")
     init()
 
-    # 侧边栏导航
     with st.sidebar:
         st.header("📌 导航")
         st.session_state.page = st.radio("功能页面", ["航线规划", "飞行监控"])
@@ -178,7 +171,6 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    # ========================= 航线规划页面 =========================
     if st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划")
         col_map, col_panel = st.columns([3, 1.2])
@@ -224,10 +216,10 @@ def main():
                     b = st.session_state.points.get('B')
                     if a and b:
                         path = [a, b]
-                        # 重置模拟器
+                        # 创建新的模拟器并启动
                         st.session_state.sim = HeartbeatSim(a.copy())
                         st.session_state.sim.set_path(path, st.session_state.flight_alt, st.session_state.drone_speed)
-                        st.session_state.latest_hb = st.session_state.sim.history[0] if st.session_state.sim.history else None
+                        st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
                         st.session_state.hb_list = [st.session_state.latest_hb] if st.session_state.latest_hb else []
                         st.session_state.flight_trail = [[st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]] if st.session_state.latest_hb else []
                         st.session_state.flight_started = True
@@ -238,7 +230,8 @@ def main():
             with col_stop:
                 if st.button("⏹️ 停止飞行", use_container_width=True):
                     st.session_state.flight_started = False
-                    st.session_state.sim.running = False
+                    if st.session_state.sim:
+                        st.session_state.sim.running = False
                     st.info("飞行已停止")
                     st.rerun()
 
@@ -248,7 +241,6 @@ def main():
                 st.metric("当前心跳序号", hb.seq)
 
         with col_map:
-            # 确保规划路径存在
             if st.session_state.plan_path is None and st.session_state.points.get('A') and st.session_state.points.get('B'):
                 st.session_state.plan_path = [st.session_state.points['A'], st.session_state.points['B']]
             drone_pos = None
@@ -258,13 +250,12 @@ def main():
                                   st.session_state.plan_path, drone_pos, st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
-    # ========================= 飞行监控页面 =========================
-    else:
+    else:  # 飞行监控页面
         st.header("📡 飞行监控 - 实时心跳包")
-        # 每秒自动刷新页面（仅用于显示更新，不驱动心跳）
-        # 使用 st_autorefresh 需要安装 streamlit-autorefresh，如果不安装可以手动点击刷新按钮。
-        # 这里为了简单，不加自动刷新，用户看到的数据会静态，但点击“刷新数据”按钮可更新。
-        # 为了让数据实时显示，我们添加一个手动刷新按钮。
+        # 添加自动刷新，每秒刷新页面以显示最新数据
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=1000, key="monitor_auto")
+
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
@@ -274,8 +265,9 @@ def main():
             st.stop()
 
         hb = st.session_state.latest_hb
-        progress_val = st.session_state.sim.progress
+        progress_val = st.session_state.sim.progress if hasattr(st.session_state.sim, 'progress') else 0.0
         st.progress(progress_val, text=f"飞行进度：{progress_val*100:.1f}%")
+
         col1, col2, col3, col4 = st.columns(4)
         with col1: st.metric("飞行时间", f"{hb.flight_time:.1f} s")
         with col2: st.metric("当前心跳序号", hb.seq)
@@ -307,10 +299,6 @@ def main():
             st.line_chart(df, x="时间", y="高度")
         else:
             st.info("等待更多数据...")
-
-        # 添加手动刷新按钮（因为没加自动刷新，用户可以点此刷新）
-        if st.button("🔄 刷新数据", use_container_width=True):
-            st.rerun()
 
 if __name__ == "__main__":
     main()
