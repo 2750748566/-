@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import folium
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------- 配置 ---------------------------------
@@ -157,7 +157,8 @@ def main():
             # 无人机当前位置
             if drone_pos:
                 folium.Marker([drone_pos[1], drone_pos[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
-            folium_static(m, width=700, height=550)
+            # 使用 st_folium 代替 folium_static
+            st_folium(m, width=700, height=550, returned_objects=[])
 
     # ========================= 飞行监控页面 =========================
     else:
