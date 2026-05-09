@@ -9,10 +9,10 @@ from streamlit_folium import folium_static
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------- 配置 ---------------------------------
-SCHOOL_CENTER = [118.749413, 32.234097]
-GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-BASE_SPEED = 5.0   # 米/秒
-HEARTBEAT_INTERVAL = 0.2  # 心跳间隔（秒）
+SCHOOL_CENTER = [118.749413, 32.234097]        # 南京科技职业学院中心
+GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"  # 高德卫星图
+BASE_SPEED = 5.0           # 基础速度（米/秒）
+HEARTBEAT_INTERVAL = 0.2   # 心跳间隔（秒）
 
 # ------------------------------- 辅助函数 -------------------------------
 def distance(p1, p2):
@@ -105,6 +105,14 @@ def main():
                     st.rerun()
 
             if st.session_state.flight_started:
+                # 实时计算进度（用于显示）
+                if st.session_state.start_time:
+                    elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
+                    total_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
+                    speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
+                    total_time = total_dist / speed if speed > 0 else 1
+                    progress = min(1.0, elapsed / total_time)
+                    st.session_state.progress = progress
                 st.metric("实时进度", f"{st.session_state.progress*100:.1f}%")
                 if st.session_state.history:
                     st.metric("当前心跳序号", st.session_state.history[-1]['seq'])
@@ -154,13 +162,13 @@ def main():
     # ========================= 飞行监控页面 =========================
     else:
         st.header("📡 飞行监控 - 实时心跳包")
-        st_autorefresh(interval=1000, key="monitor")
+        st_autorefresh(interval=1000, key="monitor")   # 每秒自动刷新
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 计算进度和生成心跳历史
+        # 计算进度并生成心跳历史
         if st.session_state.start_time:
             elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
             total_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
@@ -169,13 +177,14 @@ def main():
             progress = min(1.0, elapsed / total_time)
             st.session_state.progress = progress
 
-            # 生成心跳历史：根据当前时间计算应该有心跳序号
+            # 根据当前时间生成所有应产生的心跳
             expected_seq = int(elapsed / HEARTBEAT_INTERVAL) + 1
             current_seq = len(st.session_state.history)
             for seq in range(current_seq+1, expected_seq+1):
                 flight_t = (seq - 1) * HEARTBEAT_INTERVAL
                 st.session_state.history.append({'flight_time': flight_t, 'seq': seq})
-            # 更新轨迹点（每秒记录一个点，避免太多）
+
+            # 记录轨迹点（每0.5秒左右一个点，避免过多）
             if progress < 1.0:
                 lng = st.session_state.points['A'][0] + (st.session_state.points['B'][0] - st.session_state.points['A'][0]) * progress
                 lat = st.session_state.points['A'][1] + (st.session_state.points['B'][1] - st.session_state.points['A'][1]) * progress
