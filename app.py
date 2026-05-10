@@ -5,7 +5,6 @@ import json
 import os
 import math
 import time
-import heapq
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -18,7 +17,7 @@ HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
 CONFIG_FILE = "obstacle_config.json"
 
-# ------------------------------- 坐标转换 ---------------------------------
+# ------------------------------- 坐标转换函数 ---------------------------------
 def wgs84_to_gcj02(lng, lat):
     return lng + 0.006, lat + 0.002
 
@@ -98,7 +97,7 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
-    """检查线段p1-p2是否与多边形相交或接触"""
+    """检查线段p1-p2是否与多边形相交（包括边界）"""
     if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
@@ -110,7 +109,7 @@ def line_intersects_polygon(p1, p2, polygon):
     return False
 
 def get_blocking_obstacles(start, end, obstacles, flight_alt):
-    """返回与直线段AB相交且高度大于飞行高度的障碍物列表"""
+    """返回与直线AB相交且高度大于飞行高度的障碍物列表"""
     blocking = []
     for obs in obstacles:
         if obs.get('height', 30) > flight_alt:
@@ -119,120 +118,73 @@ def get_blocking_obstacles(start, end, obstacles, flight_alt):
                 blocking.append(obs)
     return blocking
 
-# ------------------------------- 全局避障路径规划 (可见图 + Dijkstra) -------------------------------
-def collect_vertices(obstacles, flight_alt):
-    """收集所有高度大于飞行高度的障碍物的顶点，去重"""
-    vertices = set()
-    for obs in obstacles:
-        if obs.get('height', 30) > flight_alt:
-            for pt in obs.get('polygon', []):
-                vertices.add((pt[0], pt[1]))
-    return [list(v) for v in vertices]
+def meters_to_deg(meters, lat=32.23):
+    lat_deg = meters / 111000
+    lng_deg = meters / (111000 * math.cos(math.radians(lat)))
+    return lng_deg, lat_deg
 
-def is_edge_clear(p1, p2, obstacles, flight_alt):
-    """检查线段p1-p2是否与任何高度大于飞行高度的障碍物相交（包括接触）"""
-    for obs in obstacles:
-        if obs.get('height', 30) > flight_alt:
-            coords = obs.get('polygon', [])
-            if coords and line_intersects_polygon(p1, p2, coords):
-                return False
-    return True
+# ------------------------------- 三个绕行算法（核心） ---------------------------------
+def compute_blocked_bounds(blocking_obs):
+    """计算所有阻挡障碍物的整体外接矩形（经度范围、纬度范围）"""
+    min_lng = float('inf')
+    max_lng = -float('inf')
+    min_lat = float('inf')
+    max_lat = -float('inf')
+    for obs in blocking_obs:
+        for p in obs.get('polygon', []):
+            min_lng = min(min_lng, p[0])
+            max_lng = max(max_lng, p[0])
+            min_lat = min(min_lat, p[1])
+            max_lat = max(max_lat, p[1])
+    return min_lng, max_lng, min_lat, max_lat
 
-def build_visibility_graph(points, obstacles, flight_alt):
-    """构建可见图：节点为points列表，返回邻接表"""
-    n = len(points)
-    adj = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i+1, n):
-            if is_edge_clear(points[i], points[j], obstacles, flight_alt):
-                dist = distance(points[i], points[j])
-                adj[i].append((j, dist))
-                adj[j].append((i, dist))
-    return adj
-
-def dijkstra(adj, start_idx, end_idx):
-    """Dijkstra求最短路径，返回路径点索引列表"""
-    n = len(adj)
-    dist = [float('inf')] * n
-    prev = [-1] * n
-    dist[start_idx] = 0
-    pq = [(0, start_idx)]
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist[u]:
-            continue
-        if u == end_idx:
-            break
-        for v, w in adj[u]:
-            nd = d + w
-            if nd < dist[v]:
-                dist[v] = nd
-                prev[v] = u
-                heapq.heappush(pq, (nd, v))
-    if dist[end_idx] == float('inf'):
-        return None
-    # 重建路径
-    path = []
-    cur = end_idx
-    while cur != -1:
-        path.append(cur)
-        cur = prev[cur]
-    path.reverse()
-    return path
-
-def plan_global_avoidance_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """
-    基于可见图的最优避障路径规划。
-    将所有阻挡障碍物的顶点、起点、终点作为节点，连接可见边，然后求最短路径。
-    """
-    # 如果直线无障碍，直接返回直线
-    if is_edge_clear(start, end, obstacles, flight_alt):
+def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """向左绕行（从障碍物上方绕行）"""
+    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
+    if not blocking:
         return [start, end]
 
-    # 收集所有阻挡障碍物的顶点
-    vertices = collect_vertices(obstacles, flight_alt)
-    if not vertices:
-        # 无阻挡障碍物（但前面检测直线有阻挡，矛盾？），回退到简单绕行
+    _, _, _, max_lat = compute_blocked_bounds(blocking)
+    safe_lat = meters_to_deg(safety_radius * 5)[1]  # 垂直安全偏移量
+    y_offset = max_lat + safe_lat
+
+    # 路径：起点 -> 垂直向上到 (start[0], y_offset) -> 水平到 (end[0], y_offset) -> 垂直向下到终点
+    waypoint_up = [start[0], y_offset]
+    waypoint_right = [end[0], y_offset]
+    return [start, waypoint_up, waypoint_right, end]
+
+def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """向右绕行（从障碍物下方绕行）"""
+    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
+    if not blocking:
         return [start, end]
 
-    # 构建包含起点和终点的点集
-    points = [start] + vertices + [end]
-    start_idx = 0
-    end_idx = len(points) - 1
+    _, _, min_lat, _ = compute_blocked_bounds(blocking)
+    safe_lat = meters_to_deg(safety_radius * 5)[1]
+    y_offset = min_lat - safe_lat
 
-    # 构建可见图
-    adj = build_visibility_graph(points, obstacles, flight_alt)
+    waypoint_down = [start[0], y_offset]
+    waypoint_right = [end[0], y_offset]
+    return [start, waypoint_down, waypoint_right, end]
 
-    # 找最短路径
-    path_indices = dijkstra(adj, start_idx, end_idx)
-    if path_indices is None:
-        # 如果找不到路径（例如障碍物完全包围），简单返回直线
-        return [start, end]
+def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """比较左、右路径长度，选择较短的"""
+    left_path = find_left_path(start, end, obstacles, flight_alt, safety_radius)
+    right_path = find_right_path(start, end, obstacles, flight_alt, safety_radius)
+    left_len = sum(distance(left_path[i], left_path[i+1]) for i in range(len(left_path)-1))
+    right_len = sum(distance(right_path[i], right_path[i+1]) for i in range(len(right_path)-1))
+    return left_path if left_len <= right_len else right_path
 
-    # 提取路径点坐标
-    path = [points[i] for i in path_indices]
+def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_radius=5):
+    """统一接口：根据方向生成避障路径"""
+    if direction == "向左绕行":
+        return find_left_path(start, end, obstacles, flight_alt, safety_radius)
+    elif direction == "向右绕行":
+        return find_right_path(start, end, obstacles, flight_alt, safety_radius)
+    else:  # 最佳航线
+        return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-    # 简化路径：去除共线的中间点（可选）
-    def simplify_path(path):
-        if len(path) <= 2:
-            return path
-        new_path = [path[0]]
-        for i in range(1, len(path)-1):
-            # 检查 path[i-1], path[i], path[i+1] 是否共线
-            p0 = new_path[-1]
-            p1 = path[i]
-            p2 = path[i+1]
-            # 叉积判断共线
-            cross = (p1[0]-p0[0])*(p2[1]-p1[1]) - (p1[1]-p0[1])*(p2[0]-p1[0])
-            if abs(cross) > 1e-8:
-                new_path.append(p1)
-        new_path.append(path[-1])
-        return new_path
-
-    path = simplify_path(path)
-    return path
-
-# ------------------------------- 心跳模拟器 ---------------------------------
+# ------------------------------- 心跳模拟器（保持不变） ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -362,7 +314,7 @@ def init():
         'flight_alt': 50,
         'drone_speed': 50,
         'safety_radius': 5,
-        'avoid_direction': "智能规划",   # 统一使用智能规划，不再区分方向
+        'avoid_direction': "最佳航线",
         'coord_sys': 'GCJ-02',
         'obstacles': load_obstacles(),
         'pending_obstacle': None
@@ -391,7 +343,7 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    # 障碍物管理页面（同前，略写）
+    # 障碍物管理页面（完整）
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
         st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.2")
@@ -497,10 +449,10 @@ def main():
             if st.button("设置 A 点", use_container_width=True):
                 gcj_lng, gcj_lat = transform_to_gcj02(a_lng, a_lat, st.session_state.coord_sys)
                 st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
-                # 更新规划路径
-                st.session_state.plan_path = plan_global_avoidance_path(
+                st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt, st.session_state.safety_radius)
+                    st.session_state.obstacles, st.session_state.flight_alt,
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
 
             st.markdown("#### 📍 终点 B")
@@ -513,9 +465,10 @@ def main():
             if st.button("设置 B 点", use_container_width=True):
                 gcj_lng, gcj_lat = transform_to_gcj02(b_lng, b_lat, st.session_state.coord_sys)
                 st.session_state.points_gcj['B'] = [gcj_lng, gcj_lat]
-                st.session_state.plan_path = plan_global_avoidance_path(
+                st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt, st.session_state.safety_radius)
+                    st.session_state.obstacles, st.session_state.flight_alt,
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
 
             st.markdown("---")
@@ -523,26 +476,32 @@ def main():
             new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
             if new_alt != st.session_state.flight_alt:
                 st.session_state.flight_alt = new_alt
-                st.session_state.plan_path = plan_global_avoidance_path(
+                st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, new_alt, st.session_state.safety_radius)
+                    st.session_state.obstacles, new_alt,
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
             new_speed = st.slider("速度系数 (%)", 10, 100, st.session_state.drone_speed, 5)
             st.session_state.drone_speed = new_speed
             new_radius = st.slider("安全半径 (米)", 1, 20, st.session_state.safety_radius, 1)
             if new_radius != st.session_state.safety_radius:
                 st.session_state.safety_radius = new_radius
-                st.session_state.plan_path = plan_global_avoidance_path(
+                st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt, new_radius)
+                    st.session_state.obstacles, st.session_state.flight_alt,
+                    st.session_state.avoid_direction, new_radius)
                 st.rerun()
 
             st.markdown("---")
             st.subheader("🤖 避障策略")
-            # 统一使用智能规划，选项仅用于显示
-            st.info("自动智能避障：基于可见图全局最优路径，自动绕过所有障碍物")
-            # 保留原变量避免错误
-            st.session_state.avoid_direction = "智能规划"
+            direction = st.radio("绕行方向", ["最佳航线", "向左绕行", "向右绕行"], index=["最佳航线", "向左绕行", "向右绕行"].index(st.session_state.avoid_direction))
+            if direction != st.session_state.avoid_direction:
+                st.session_state.avoid_direction = direction
+                st.session_state.plan_path = create_avoidance_path(
+                    st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                    st.session_state.obstacles, st.session_state.flight_alt,
+                    direction, st.session_state.safety_radius)
+                st.rerun()
 
             st.markdown("---")
             col_start, col_stop = st.columns(2)
@@ -579,9 +538,10 @@ def main():
 
         with col_map:
             if st.session_state.plan_path is None and st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
-                st.session_state.plan_path = plan_global_avoidance_path(
+                st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt, st.session_state.safety_radius)
+                    st.session_state.obstacles, st.session_state.flight_alt,
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
             drone_pos_gcj = None
             if st.session_state.flight_started and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
