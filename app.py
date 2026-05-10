@@ -1,21 +1,18 @@
 import streamlit as st
+import time
 import math
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import folium
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------- 配置 ---------------------------------
 SCHOOL_CENTER = [118.749413, 32.234097]        # 南京科技职业学院中心
+GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"  # 高德卫星图
 HEARTBEAT_INTERVAL = 0.2   # 心跳间隔（秒）
 BASE_SPEED = 5.0           # 基础速度（米/秒）
-# 高德瓦片（备用，实际地图改用JS API，但保留变量）
-GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-
-# 高德地图 JS API Key（请替换为你自己的）
-AMAP_KEY = "e261f231ca30f2b7aef79d8b3e5964d2"   # 用户提供的
 
 def distance(p1, p2):
     return math.hypot(p1[0]-p2[0], p1[1]-p2[1])
@@ -26,28 +23,24 @@ def main():
     st.title("🏫 南京科技职业学院 - 无人机地面站 (心跳正比例图像)")
 
     # 初始化 session_state
-    defaults = {
-        'flight_started': False,
-        'start_time': None,
-        'points': {'A': [118.746956, 32.232945], 'B': [118.751589, 32.235204]},
-        'flight_alt': 50,
-        'drone_speed': 50,
-        'progress': 0.0,
-        'flight_trail': [],
-        'history': [],          # 存储 {'flight_time': float, 'seq': int}
-        'page': '航线规划',
-        'arrived': False,
-        'total_time': 0.0
-    }
-    for k,v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-    # 计算A-B直线距离和总时间
-    total_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
-    speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
-    total_time_needed = total_dist / speed if speed > 0 else 0.001
-    st.session_state.total_time = total_time_needed
+    if 'flight_started' not in st.session_state:
+        st.session_state.flight_started = False
+        st.session_state.start_time = None
+        st.session_state.points = {
+            'A': [118.746956, 32.232945],
+            'B': [118.751589, 32.235204]
+        }
+        st.session_state.flight_alt = 50
+        st.session_state.drone_speed = 50
+        st.session_state.progress = 0.0
+        st.session_state.flight_trail = []          # 轨迹点 [lng, lat]
+        st.session_state.history = []               # 心跳历史 [{'flight_time': float, 'seq': int}]
+        st.session_state.page = "航线规划"
+        st.session_state.arrived = False
+        # 总飞行时间（秒）
+        total_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
+        speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
+        st.session_state.total_time = total_dist / speed if speed > 0 else 0.001
 
     # 侧边栏
     with st.sidebar:
@@ -74,6 +67,9 @@ def main():
                 a_lng = st.number_input("经度", value=st.session_state.points['A'][0], format="%.6f", key="a_lng")
             if st.button("设置 A 点", use_container_width=True):
                 st.session_state.points['A'] = [a_lng, a_lat]
+                # 重新计算总时间
+                new_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
+                st.session_state.total_time = new_dist / (BASE_SPEED * (st.session_state.drone_speed/100.0))
                 st.rerun()
 
             st.markdown("#### 📍 终点 B")
@@ -84,7 +80,6 @@ def main():
                 b_lng = st.number_input("经度", value=st.session_state.points['B'][0], format="%.6f", key="b_lng")
             if st.button("设置 B 点", use_container_width=True):
                 st.session_state.points['B'] = [b_lng, b_lat]
-                # 重新计算总时间
                 new_dist = distance(st.session_state.points['A'], st.session_state.points['B'])
                 st.session_state.total_time = new_dist / (BASE_SPEED * (st.session_state.drone_speed/100.0))
                 st.rerun()
@@ -121,7 +116,6 @@ def main():
                     st.info("飞行已停止")
                     st.rerun()
 
-            # 显示当前进度（如果飞行中）
             if st.session_state.flight_started and st.session_state.start_time:
                 elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
                 progress = min(1.0, elapsed / st.session_state.total_time)
@@ -130,9 +124,8 @@ def main():
                 if st.session_state.history:
                     st.metric("当前心跳序号", st.session_state.history[-1]['seq'])
 
-        # 地图显示（采用高德JS API嵌入，避免序列化错误）
+        # 地图显示（使用 Folium + 高德瓦片，避免序列化错误，因为地图中没有 Draw 插件等）
         with col_map:
-            st.subheader("🗺️ 规划地图")
             # 计算当前无人机位置
             drone_pos = None
             if st.session_state.flight_started and st.session_state.start_time:
@@ -144,83 +137,49 @@ def main():
                     drone_pos = [lng, lat]
                 else:
                     drone_pos = st.session_state.points['B'][:]
-            # 构建历史轨迹点列表
-            trail_pts = st.session_state.flight_trail
-            # 生成HTML地图
-            amap_html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <title>高德地图</title>
-                <style>
-                    html, body, #container {{ width: 100%; height: 100%; margin: 0; padding: 0; }}
-                </style>
-            </head>
-            <body>
-                <div id="container"></div>
-                <script src="https://webapi.amap.com/maps?v=2.0&key={AMAP_KEY}"></script>
-                <script>
-                    var map = new AMap.Map('container', {{
-                        center: [{SCHOOL_CENTER[0]}, {SCHOOL_CENTER[1]}],
-                        zoom: 16,
-                        viewMode: '2D',
-                        layers: [new AMap.TileLayer.Satellite()]
-                    }});
-                    // 起点 A
-                    new AMap.Marker({{
-                        position: [{st.session_state.points['A'][0]}, {st.session_state.points['A'][1]}],
-                        title: '起点 A',
-                        label: {{ content: 'A', offset: new AMap.Pixel(0, -20) }},
-                        icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png'
-                    }}).setMap(map);
-                    // 终点 B
-                    new AMap.Marker({{
-                        position: [{st.session_state.points['B'][0]}, {st.session_state.points['B'][1]}],
-                        title: '终点 B',
-                        label: {{ content: 'B', offset: new AMap.Pixel(0, -20) }},
-                        icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png'
-                    }}).setMap(map);
-                    // 规划路径（直线）
-                    new AMap.Polyline({{
-                        path: [[{st.session_state.points['A'][1]}, {st.session_state.points['A'][0]}], [{st.session_state.points['B'][1]}, {st.session_state.points['B'][0]}]],
-                        strokeColor: 'green',
-                        strokeWeight: 4
-                    }}).setMap(map);
-                    // 历史轨迹
-                    {f"new AMap.Polyline({{ path: {[[lat, lng] for lng, lat in trail_pts]}, strokeColor: 'orange', strokeWeight: 3 }}).setMap(map);" if len(trail_pts)>1 else ""}
-                    // 无人机当前位置
-                    {f"new AMap.Marker({{ position: [{drone_pos[0]}, {drone_pos[1]}], icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_blue.png', label: {{ content: '✈️', offset: new AMap.Pixel(0, -20) }} }}).setMap(map);" if drone_pos else ""}
-                </script>
-            </body>
-            </html>
-            """
-            from streamlit.components.v1 import html
-            html(amap_html, width=700, height=550)
+            # 构建地图
+            m = folium.Map(location=[SCHOOL_CENTER[1], SCHOOL_CENTER[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
+            # 起点
+            folium.Marker([st.session_state.points['A'][1], st.session_state.points['A'][0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
+            # 终点
+            folium.Marker([st.session_state.points['B'][1], st.session_state.points['B'][0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
+            # 规划路径（直线）
+            folium.PolyLine([[st.session_state.points['A'][1], st.session_state.points['A'][0]],
+                             [st.session_state.points['B'][1], st.session_state.points['B'][0]]],
+                            color='green', weight=4).add_to(m)
+            # 历史轨迹
+            if st.session_state.flight_trail:
+                trail_points = [[lat, lng] for lng, lat in st.session_state.flight_trail]
+                folium.PolyLine(trail_points, color='orange', weight=3).add_to(m)
+            # 无人机当前位置
+            if drone_pos:
+                folium.Marker([drone_pos[1], drone_pos[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
+            # 使用 st_folium，但必须保证地图中没有不可序列化的元素（如 Draw 插件）。这里所有元素都是可序列化的。
+            st_folium(m, width=700, height=550, returned_objects=[])
 
     # ========================= 飞行监控页面 =========================
     else:
         st.header("📡 飞行监控 - 实时心跳包")
-        st_autorefresh(interval=1000, key="monitor")
+        st_autorefresh(interval=1000, key="monitor")   # 每秒自动刷新
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 计算当前进度和心跳
+        # 更新进度和心跳历史
         if st.session_state.start_time:
             elapsed = (datetime.now() - st.session_state.start_time).total_seconds()
             progress = min(1.0, elapsed / st.session_state.total_time)
             st.session_state.progress = progress
 
-            # 生成心跳历史
+            # 生成心跳
             expected_seq = int(elapsed / HEARTBEAT_INTERVAL) + 1
             current_seq = len(st.session_state.history)
             for seq in range(current_seq+1, expected_seq+1):
                 flight_t = (seq - 1) * HEARTBEAT_INTERVAL
                 st.session_state.history.append({'flight_time': flight_t, 'seq': seq})
 
-            # 更新轨迹点（每0.1个进度记录一个点）
+            # 更新轨迹点（仅在进展明显时添加）
             if progress < 1.0:
                 lng = st.session_state.points['A'][0] + (st.session_state.points['B'][0] - st.session_state.points['A'][0]) * progress
                 lat = st.session_state.points['A'][1] + (st.session_state.points['B'][1] - st.session_state.points['A'][1]) * progress
@@ -233,77 +192,37 @@ def main():
                     st.success("🎉 无人机已到达目的地！")
                     st.rerun()
 
-        # 获取最新心跳
         if not st.session_state.history:
             st.warning("等待心跳数据...")
             st.stop()
+
         latest = st.session_state.history[-1]
+        st.progress(st.session_state.progress, text=f"✈️ 飞行进度：{st.session_state.progress*100:.1f}%")
 
-        # ---------- 仪表盘样式 ----------
-        # 飞行进度条
-        st.progress(st.session_state.progress, text=f"✈️ 飞行进度：{st.session_state.progress*100:.0f}%")
-
-        # 第一行：航点进度
-        total_waypoints = 2   # 起点和终点，视为2个航点
-        current_waypoint = 1 if st.session_state.progress < 1.0 else 2
-        col_w1, col_w2 = st.columns(2)
-        with col_w1:
-            st.metric("🎯 当前航点", f"{current_waypoint} / {total_waypoints}")
-        with col_w2:
-            st.metric("进度", f"{st.session_state.progress*100:.0f}%")
-
-        # 第二行：速度、已用时间、剩余距离
-        speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
-        remaining_dist = (1 - st.session_state.progress) * distance(st.session_state.points['A'], st.session_state.points['B']) * 111000
-        elapsed_sec = elapsed
-        col_sp1, col_sp2, col_sp3 = st.columns(3)
-        with col_sp1:
-            st.metric("💨 飞行速度", f"{speed:.1f} m/s", delta=f"{st.session_state.drone_speed}% 系数")
-            st.caption(f"≈ {speed*3.6:.1f} km/h")
-        with col_sp2:
-            minutes = int(elapsed_sec // 60)
-            seconds = int(elapsed_sec % 60)
-            st.metric("⏰ 已用时间", f"{minutes:02d}:{seconds:02d}", delta=f"{elapsed_sec:.1f}秒")
-        with col_sp3:
-            st.metric("📏 剩余距离", f"{remaining_dist:.0f} m")
-
-        # 第三行：预计到达时间
-        if st.session_state.progress > 0.01:
-            eta_sec = (1 - st.session_state.progress) * st.session_state.total_time
-            eta_min = int(eta_sec // 60)
-            eta_sec_int = int(eta_sec % 60)
-            st.metric("🕐 预计到达", f"{eta_min:02d}:{eta_sec_int:02d}")
-        else:
-            st.metric("🕐 预计到达", "计算中...")
-
-        # 第四行：电量模拟
-        voltage = 22.2 - (st.session_state.progress * 2.5)  # 从22.2V线性降到19.7V
-        battery_percent = max(0, min(100, (voltage - 19.2) / (22.2 - 19.2) * 100))
-        col_bat1, col_bat2 = st.columns(2)
-        with col_bat1:
-            st.metric("🔋 电池电压", f"{voltage:.1f} V")
-        with col_bat2:
-            st.progress(battery_percent/100, text=f"电量 {battery_percent:.0f}%")
+        # 主要指标
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("⏰ 飞行时间", f"{latest['flight_time']:.1f} s")
+        with col2: st.metric("💓 当前心跳序号", latest['seq'])
+        with col3: st.metric("📏 飞行高度", f"{st.session_state.flight_alt} m")
+        with col4: st.metric("⚡ 速度系数", f"{st.session_state.drone_speed}%")
 
         st.markdown("---")
+        st.subheader("💓 心跳序号 vs 飞行时间 (正比例关系)")
 
-        # ---------- 心跳序号-时间正比例图 ----------
-        st.subheader("💓 心跳序号 vs 飞行时间（正比例关系）")
         if len(st.session_state.history) >= 2:
             times = [h['flight_time'] for h in st.session_state.history]
             seqs = [h['seq'] for h in st.session_state.history]
-            fig, ax = plt.subplots(figsize=(8,4))
-            ax.plot(times, seqs, marker='o', markersize=3, linewidth=2, color='#1f77b4')
-            ax.set_xlabel('飞行时间 (秒)')
-            ax.set_ylabel('心跳包序号')
-            ax.set_title('心跳序号与飞行时间关系（斜率 = 1/心跳间隔）')
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.plot(times, seqs, marker='o', markersize=4, linewidth=2, color='#1f77b4')
+            ax.set_xlabel('飞行时间 (秒)', fontsize=12)
+            ax.set_ylabel('心跳包序号', fontsize=12)
+            ax.set_title('心跳序号与飞行时间关系（正比例）', fontsize=14)
             ax.grid(True, linestyle='--', alpha=0.6)
             st.pyplot(fig)
             plt.close(fig)
         else:
             st.info(f"等待更多心跳数据... (当前 {len(st.session_state.history)} 个)")
 
-        # 可选：高度变化曲线（因为高度固定，可以省略或显示一条直线）
         st.markdown("---")
         st.subheader("📈 实时趋势（高度）")
         if len(st.session_state.history) > 1:
