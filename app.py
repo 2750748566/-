@@ -107,6 +107,14 @@ def line_intersects_polygon(p1, p2, polygon):
             return True
     return False
 
+def get_polygon_bounds(polygon):
+    min_lng = min(p[0] for p in polygon)
+    max_lng = max(p[0] for p in polygon)
+    min_lat = min(p[1] for p in polygon)
+    max_lat = max(p[1] for p in polygon)
+    return min_lng, max_lng, min_lat, max_lat
+
+# ------------------------------- 绕行算法（真正绕过障碍物） -------------------------------
 def get_blocking_obstacles(start, end, obstacles, flight_alt):
     blocking = []
     for obs in obstacles:
@@ -121,66 +129,61 @@ def meters_to_deg(meters, lat=32.23):
     lng_deg = meters / (111000 * math.cos(math.radians(lat)))
     return lng_deg, lat_deg
 
-# ------------------------------- 改进的绕行算法 -------------------------------
 def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """向左绕行：垂直向左偏移，然后沿平行方向前进"""
+    """向左绕行：从障碍物顶部（北侧）绕过"""
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
         return [start, end]
     
-    # 计算方向向量
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = math.hypot(dx, dy)
-    if length == 0:
-        return [start, end]
-    ux = dx / length
-    uy = dy / length
-    # 垂直向左的单位向量（逆时针旋转90度）
-    lx = -uy
-    ly = ux
+    # 合并所有阻挡障碍物的外接矩形
+    min_lng = float('inf')
+    max_lng = -float('inf')
+    min_lat = float('inf')
+    max_lat = -float('inf')
+    for obs in blocking:
+        lngs = [p[0] for p in obs['polygon']]
+        lats = [p[1] for p in obs['polygon']]
+        min_lng = min(min_lng, min(lngs))
+        max_lng = max(max_lng, max(lngs))
+        min_lat = min(min_lat, min(lats))
+        max_lat = max(max_lat, max(lats))
     
-    # 偏移距离（米）
-    offset_meters = safety_radius * 10
-    lat_mid = (start[1] + end[1]) / 2
-    deg_per_meter_lng = 1 / (111000 * math.cos(math.radians(lat_mid)))
-    deg_per_meter_lat = 1 / 111000
-    offset_x = lx * offset_meters * deg_per_meter_lng
-    offset_y = ly * offset_meters * deg_per_meter_lat
-    
-    start_offset = [start[0] + offset_x, start[1] + offset_y]
-    end_offset = [end[0] + offset_x, end[1] + offset_y]
-    return [start, start_offset, end_offset, end]
+    safe_lng, safe_lat = meters_to_deg(safety_radius * 2)
+    # 顶部绕行点：经度在起点和终点之间偏移，纬度在障碍物顶部上方
+    mid_lng = (start[0] + end[0]) / 2
+    waypoint1 = [mid_lng, max_lat + safe_lat]
+    waypoint2 = [mid_lng, max_lat + safe_lat]
+    # 确保路径不穿过矩形：添加起点到顶部左侧点，然后到顶部右侧点，再到终点
+    # 简单起见，生成三点路径：起点 -> 顶部中间点 -> 终点，但这样可能仍与障碍物相交？
+    # 更安全：起点 -> 顶部左侧点 -> 顶部右侧点 -> 终点
+    left_x = min_lng - safe_lng
+    right_x = max_lng + safe_lng
+    top_y = max_lat + safe_lat
+    return [start, [left_x, top_y], [right_x, top_y], end]
 
 def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """向右绕行：垂直向右偏移，然后沿平行方向前进（不产生向后运动）"""
+    """向右绕行：从障碍物底部（南侧）绕过"""
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
         return [start, end]
     
-    # 计算方向向量
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = math.hypot(dx, dy)
-    if length == 0:
-        return [start, end]
-    ux = dx / length
-    uy = dy / length
-    # 垂直向右的单位向量（顺时针旋转90度）
-    rx = uy
-    ry = -ux
+    min_lng = float('inf')
+    max_lng = -float('inf')
+    min_lat = float('inf')
+    max_lat = -float('inf')
+    for obs in blocking:
+        lngs = [p[0] for p in obs['polygon']]
+        lats = [p[1] for p in obs['polygon']]
+        min_lng = min(min_lng, min(lngs))
+        max_lng = max(max_lng, max(lngs))
+        min_lat = min(min_lat, min(lats))
+        max_lat = max(max_lat, max(lats))
     
-    # 偏移距离（米）
-    offset_meters = safety_radius * 10
-    lat_mid = (start[1] + end[1]) / 2
-    deg_per_meter_lng = 1 / (111000 * math.cos(math.radians(lat_mid)))
-    deg_per_meter_lat = 1 / 111000
-    offset_x = rx * offset_meters * deg_per_meter_lng
-    offset_y = ry * offset_meters * deg_per_meter_lat
-    
-    start_offset = [start[0] + offset_x, start[1] + offset_y]
-    end_offset = [end[0] + offset_x, end[1] + offset_y]
-    return [start, start_offset, end_offset, end]
+    safe_lng, safe_lat = meters_to_deg(safety_radius * 2)
+    left_x = min_lng - safe_lng
+    right_x = max_lng + safe_lng
+    bottom_y = min_lat - safe_lat
+    return [start, [left_x, bottom_y], [right_x, bottom_y], end]
 
 def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
     left = find_left_path(start, end, obstacles, flight_alt, safety_radius)
@@ -342,7 +345,6 @@ def main():
     st.title("🏫 南京科技职业学院 - 无人机地面站系统")
     init()
 
-    # 侧边栏
     with st.sidebar:
         st.header("📌 导航")
         selected_page = st.radio("功能页面", ["航线规划", "飞行监控", "障碍物管理"], index=["航线规划", "飞行监控", "障碍物管理"].index(st.session_state.page))
@@ -357,11 +359,11 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    # 障碍物管理页面（略，与之前相同）
+    # 障碍物管理页面（完整实现，与之前相同）
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
         st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.1")
-        st.info(f"📂 文件保存在程序同目录下，绝对路径如上所示")
+        st.info("📂 文件保存在程序同目录下，绝对路径如上所示")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("💾 保存到文件", use_container_width=True):
