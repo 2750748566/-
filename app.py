@@ -170,10 +170,14 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
 
 # ------------------------------- 初始化状态 ---------------------------------
 def init():
+    # 修改后的默认起点和终点坐标（GCJ-02）
+    DEFAULT_A_GCJ = [118.746426, 32.232384]   # 经度,纬度
+    DEFAULT_B_GCJ = [118.750966, 32.236290]   # 经度,纬度
+
     defaults = {
         'page': '航线规划',
-        'points_gcj': {'A': [118.746956, 32.232945], 'B': [118.751589, 32.235204]},
-        'sim': HeartbeatSim([118.746956, 32.232945]),
+        'points_gcj': {'A': DEFAULT_A_GCJ.copy(), 'B': DEFAULT_B_GCJ.copy()},
+        'sim': HeartbeatSim(DEFAULT_A_GCJ.copy()),
         'flight_started': False,
         'latest_hb': None,
         'hb_list': [],
@@ -244,7 +248,7 @@ def main():
                 st.warning("配置文件不存在，请先保存")
 
         st.markdown("---")
-        st.subheader("➕ 添加新障碍物")
+        st.subheader("➕ 添加新障碍物（手动输入顶点）")
         with st.form("add_obstacle_form"):
             obs_name = st.text_input("障碍物名称", "新障碍物")
             obs_height = st.number_input("高度 (米)", min_value=1, max_value=200, value=30, step=5)
@@ -299,7 +303,7 @@ def main():
                 with col_c:
                     st.code(json.dumps(obs.get('polygon', []), indent=2), language='json')
 
-        st.markdown("---")
+        # 显示文件状态
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
