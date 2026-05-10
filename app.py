@@ -97,7 +97,6 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
-    """检查线段p1-p2是否与多边形相交（包括边界）"""
     if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
@@ -118,19 +117,24 @@ def get_blocking_obstacles(start, end, obstacles, flight_alt):
                 blocking.append(obs)
     return blocking
 
+def get_all_obstacles_above_alt(obstacles, flight_alt):
+    """返回所有高度大于飞行高度的障碍物（无论是否阻挡直线）"""
+    return [obs for obs in obstacles if obs.get('height', 30) > flight_alt]
+
 def meters_to_deg(meters, lat=32.23):
     lat_deg = meters / 111000
     lng_deg = meters / (111000 * math.cos(math.radians(lat)))
     return lng_deg, lat_deg
 
-# ------------------------------- 三个绕行算法（核心） ---------------------------------
-def compute_blocked_bounds(blocking_obs):
-    """计算所有阻挡障碍物的整体外接矩形（经度范围、纬度范围）"""
+def compute_global_bounds(obstacles):
+    """计算所有障碍物的整体外接矩形"""
+    if not obstacles:
+        return None, None, None, None
     min_lng = float('inf')
     max_lng = -float('inf')
     min_lat = float('inf')
     max_lat = -float('inf')
-    for obs in blocking_obs:
+    for obs in obstacles:
         for p in obs.get('polygon', []):
             min_lng = min(min_lng, p[0])
             max_lng = max(max_lng, p[0])
@@ -138,53 +142,67 @@ def compute_blocked_bounds(blocking_obs):
             max_lat = max(max_lat, p[1])
     return min_lng, max_lng, min_lat, max_lat
 
-def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """向左绕行（从障碍物上方绕行）"""
-    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
-    if not blocking:
-        return [start, end]
-
-    _, _, _, max_lat = compute_blocked_bounds(blocking)
-    safe_lat = meters_to_deg(safety_radius * 5)[1]  # 垂直安全偏移量
-    y_offset = max_lat + safe_lat
-
-    # 路径：起点 -> 垂直向上到 (start[0], y_offset) -> 水平到 (end[0], y_offset) -> 垂直向下到终点
+# ------------------------------- 三个绕行算法（严格按方向） ---------------------------------
+def find_left_path_always(start, end, obstacles, flight_alt, safety_radius=5):
+    """
+    向左绕行：始终生成一条从障碍物上方绕过的路径。
+    如果存在高度大于飞行高度的障碍物，则根据其外接矩形确定偏移量；
+    如果没有，则使用默认偏移量（安全半径 * 10 米）。
+    """
+    relevant_obstacles = get_all_obstacles_above_alt(obstacles, flight_alt)
+    if relevant_obstacles:
+        _, _, _, max_lat = compute_global_bounds(relevant_obstacles)
+        safe_lat = meters_to_deg(safety_radius * 10)[1]
+        y_offset = max_lat + safe_lat
+    else:
+        # 没有阻挡障碍物，仍然生成一个向上凸起的绕行路径（偏移30米）
+        safe_lat = meters_to_deg(30)[1]
+        y_offset = start[1] + safe_lat if start[1] < end[1] else end[1] + safe_lat
     waypoint_up = [start[0], y_offset]
     waypoint_right = [end[0], y_offset]
     return [start, waypoint_up, waypoint_right, end]
 
-def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """向右绕行（从障碍物下方绕行）"""
-    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
-    if not blocking:
-        return [start, end]
-
-    _, _, min_lat, _ = compute_blocked_bounds(blocking)
-    safe_lat = meters_to_deg(safety_radius * 5)[1]
-    y_offset = min_lat - safe_lat
-
+def find_right_path_always(start, end, obstacles, flight_alt, safety_radius=5):
+    """
+    向右绕行：始终生成一条从障碍物下方绕过的路径。
+    如果存在高度大于飞行高度的障碍物，则根据其外接矩形确定偏移量；
+    如果没有，则使用默认偏移量（安全半径 * 10 米向下）。
+    """
+    relevant_obstacles = get_all_obstacles_above_alt(obstacles, flight_alt)
+    if relevant_obstacles:
+        _, _, min_lat, _ = compute_global_bounds(relevant_obstacles)
+        safe_lat = meters_to_deg(safety_radius * 10)[1]
+        y_offset = min_lat - safe_lat
+    else:
+        safe_lat = meters_to_deg(30)[1]
+        y_offset = start[1] - safe_lat if start[1] > end[1] else end[1] - safe_lat
     waypoint_down = [start[0], y_offset]
     waypoint_right = [end[0], y_offset]
     return [start, waypoint_down, waypoint_right, end]
 
-def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
-    """比较左、右路径长度，选择较短的"""
-    left_path = find_left_path(start, end, obstacles, flight_alt, safety_radius)
-    right_path = find_right_path(start, end, obstacles, flight_alt, safety_radius)
+def find_best_path_adaptive(start, end, obstacles, flight_alt, safety_radius=5):
+    """
+    最佳航线：如果有阻挡，比较左右绕行路径长度；如果没有阻挡，直接直线。
+    """
+    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
+    if not blocking:
+        return [start, end]
+    left_path = find_left_path_always(start, end, obstacles, flight_alt, safety_radius)
+    right_path = find_right_path_always(start, end, obstacles, flight_alt, safety_radius)
     left_len = sum(distance(left_path[i], left_path[i+1]) for i in range(len(left_path)-1))
     right_len = sum(distance(right_path[i], right_path[i+1]) for i in range(len(right_path)-1))
     return left_path if left_len <= right_len else right_path
 
 def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_radius=5):
-    """统一接口：根据方向生成避障路径"""
+    """统一接口：根据方向生成避障路径（强制沿指定方向）"""
     if direction == "向左绕行":
-        return find_left_path(start, end, obstacles, flight_alt, safety_radius)
+        return find_left_path_always(start, end, obstacles, flight_alt, safety_radius)
     elif direction == "向右绕行":
-        return find_right_path(start, end, obstacles, flight_alt, safety_radius)
+        return find_right_path_always(start, end, obstacles, flight_alt, safety_radius)
     else:  # 最佳航线
-        return find_best_path(start, end, obstacles, flight_alt, safety_radius)
+        return find_best_path_adaptive(start, end, obstacles, flight_alt, safety_radius)
 
-# ------------------------------- 心跳模拟器（保持不变） ---------------------------------
+# ------------------------------- 心跳模拟器 ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
