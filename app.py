@@ -56,7 +56,7 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v13.2'
+        'version': 'v13.3'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -142,47 +142,53 @@ def compute_global_bounds(obstacles):
             max_lat = max(max_lat, p[1])
     return min_lng, max_lng, min_lat, max_lat
 
-# ------------------------------- 三个绕行算法（严格按方向） ---------------------------------
+# ------------------------------- 三个绕行算法（严格按方向，不因高度改变方向） ---------------------------------
 def find_left_path_always(start, end, obstacles, flight_alt, safety_radius=5):
     """
-    向左绕行：始终生成一条从障碍物上方绕过的路径。
-    如果存在高度大于飞行高度的障碍物，则根据其外接矩形确定偏移量；
-    如果没有，则使用默认偏移量（安全半径 * 10 米）。
+    向左绕行：始终生成一条从所有高于飞行高度的障碍物上方绕过的路径。
+    如果没有这样障碍物，则生成一个默认的上方凸起路径（偏移30米）。
     """
-    relevant_obstacles = get_all_obstacles_above_alt(obstacles, flight_alt)
-    if relevant_obstacles:
-        _, _, _, max_lat = compute_global_bounds(relevant_obstacles)
-        safe_lat = meters_to_deg(safety_radius * 10)[1]
+    relevant = get_all_obstacles_above_alt(obstacles, flight_alt)
+    if relevant:
+        _, _, _, max_lat = compute_global_bounds(relevant)
+        # 垂直安全偏移量：安全半径 * 8 米
+        safe_lat = meters_to_deg(safety_radius * 8)[1]
         y_offset = max_lat + safe_lat
     else:
-        # 没有阻挡障碍物，仍然生成一个向上凸起的绕行路径（偏移30米）
+        # 默认偏移 30 米向上
         safe_lat = meters_to_deg(30)[1]
-        y_offset = start[1] + safe_lat if start[1] < end[1] else end[1] + safe_lat
+        # 取起点和终点中较大的纬度作为基准，再向上偏移
+        base_lat = max(start[1], end[1])
+        y_offset = base_lat + safe_lat
+
+    # 路径：起点 → 垂直向上到 (start[0], y_offset) → 水平向右到 (end[0], y_offset) → 垂直向下到终点
     waypoint_up = [start[0], y_offset]
     waypoint_right = [end[0], y_offset]
     return [start, waypoint_up, waypoint_right, end]
 
 def find_right_path_always(start, end, obstacles, flight_alt, safety_radius=5):
     """
-    向右绕行：始终生成一条从障碍物下方绕过的路径。
-    如果存在高度大于飞行高度的障碍物，则根据其外接矩形确定偏移量；
-    如果没有，则使用默认偏移量（安全半径 * 10 米向下）。
+    向右绕行：始终生成一条从所有高于飞行高度的障碍物下方绕过的路径。
+    如果没有这样障碍物，则生成一个默认的下方凸起路径（偏移30米）。
     """
-    relevant_obstacles = get_all_obstacles_above_alt(obstacles, flight_alt)
-    if relevant_obstacles:
-        _, _, min_lat, _ = compute_global_bounds(relevant_obstacles)
-        safe_lat = meters_to_deg(safety_radius * 10)[1]
+    relevant = get_all_obstacles_above_alt(obstacles, flight_alt)
+    if relevant:
+        _, _, min_lat, _ = compute_global_bounds(relevant)
+        safe_lat = meters_to_deg(safety_radius * 8)[1]
         y_offset = min_lat - safe_lat
     else:
         safe_lat = meters_to_deg(30)[1]
-        y_offset = start[1] - safe_lat if start[1] > end[1] else end[1] - safe_lat
+        base_lat = min(start[1], end[1])
+        y_offset = base_lat - safe_lat
+
     waypoint_down = [start[0], y_offset]
     waypoint_right = [end[0], y_offset]
     return [start, waypoint_down, waypoint_right, end]
 
 def find_best_path_adaptive(start, end, obstacles, flight_alt, safety_radius=5):
     """
-    最佳航线：如果有阻挡，比较左右绕行路径长度；如果没有阻挡，直接直线。
+    最佳航线：如果有阻挡直线的高度大于飞行高度的障碍物，则比较左右路径长度；
+    否则直接直线飞行。
     """
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
@@ -364,7 +370,7 @@ def main():
     # 障碍物管理页面（完整）
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.2")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.3")
         st.info("📂 文件保存在程序同目录下，绝对路径如上所示")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
