@@ -11,11 +11,11 @@ import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------- 配置 ---------------------------------
-SCHOOL_CENTER_GCJ = [118.749413, 32.234097]   # 学校中心（GCJ-02）
+SCHOOL_CENTER_GCJ = [118.749413, 32.234097]
 GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
-CONFIG_FILE = "obstacle_config.json"         # 障碍物配置文件
+CONFIG_FILE = "obstacle_config.json"
 
 # ------------------------------- 坐标转换函数 ---------------------------------
 def wgs84_to_gcj02(lng, lat):
@@ -121,41 +121,66 @@ def meters_to_deg(meters, lat=32.23):
     lng_deg = meters / (111000 * math.cos(math.radians(lat)))
     return lng_deg, lat_deg
 
+# ------------------------------- 改进的绕行算法 -------------------------------
 def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """向左绕行：垂直向左偏移，然后沿平行方向前进"""
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
         return [start, end]
-    max_lng = -float('inf')
-    max_lat = -float('inf')
-    min_lat = float('inf')
-    for obs in blocking:
-        for p in obs.get('polygon', []):
-            max_lng = max(max_lng, p[0])
-            max_lat = max(max_lat, p[1])
-            min_lat = min(min_lat, p[1])
-    safe_lng, safe_lat = meters_to_deg(safety_radius * 3)
-    obs_h = max_lat - min_lat
-    point1 = [start[0] + 0.0012, max_lat + obs_h * 3 + safe_lat * 5 + 0.0002]
-    point2 = [max_lng + obs_h * 2 + safe_lng * 3, point1[1]]
-    return [start, point1, point2, end]
+    
+    # 计算方向向量
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return [start, end]
+    ux = dx / length
+    uy = dy / length
+    # 垂直向左的单位向量（逆时针旋转90度）
+    lx = -uy
+    ly = ux
+    
+    # 偏移距离（米）
+    offset_meters = safety_radius * 10
+    lat_mid = (start[1] + end[1]) / 2
+    deg_per_meter_lng = 1 / (111000 * math.cos(math.radians(lat_mid)))
+    deg_per_meter_lat = 1 / 111000
+    offset_x = lx * offset_meters * deg_per_meter_lng
+    offset_y = ly * offset_meters * deg_per_meter_lat
+    
+    start_offset = [start[0] + offset_x, start[1] + offset_y]
+    end_offset = [end[0] + offset_x, end[1] + offset_y]
+    return [start, start_offset, end_offset, end]
 
 def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """向右绕行：垂直向右偏移，然后沿平行方向前进（不产生向后运动）"""
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
         return [start, end]
-    min_lng = float('inf')
-    min_lat = float('inf')
-    max_lat = -float('inf')
-    for obs in blocking:
-        for p in obs.get('polygon', []):
-            min_lng = min(min_lng, p[0])
-            min_lat = min(min_lat, p[1])
-            max_lat = max(max_lat, p[1])
-    safe_lng, safe_lat = meters_to_deg(safety_radius * 3)
-    obs_h = max_lat - min_lat
-    point1 = [start[0] - 0.0012, min_lat - obs_h * 3 - safe_lat * 5 - 0.0002]
-    point2 = [min_lng - obs_h * 2 - safe_lng * 3, point1[1]]
-    return [start, point1, point2, end]
+    
+    # 计算方向向量
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return [start, end]
+    ux = dx / length
+    uy = dy / length
+    # 垂直向右的单位向量（顺时针旋转90度）
+    rx = uy
+    ry = -ux
+    
+    # 偏移距离（米）
+    offset_meters = safety_radius * 10
+    lat_mid = (start[1] + end[1]) / 2
+    deg_per_meter_lng = 1 / (111000 * math.cos(math.radians(lat_mid)))
+    deg_per_meter_lat = 1 / 111000
+    offset_x = rx * offset_meters * deg_per_meter_lng
+    offset_y = ry * offset_meters * deg_per_meter_lat
+    
+    start_offset = [start[0] + offset_x, start[1] + offset_y]
+    end_offset = [end[0] + offset_x, end[1] + offset_y]
+    return [start, start_offset, end_offset, end]
 
 def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
     left = find_left_path(start, end, obstacles, flight_alt, safety_radius)
@@ -172,7 +197,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
     else:
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-# ------------------------------- 心跳模拟器（强制终点对齐） ---------------------------------
+# ------------------------------- 心跳模拟器 ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -210,7 +235,7 @@ class HeartbeatSim:
         self.speed_pct = speed_pct
         self.altitude = altitude
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
-        self.end_point = path[-1][:]   # 保存终点
+        self.end_point = path[-1][:]
         self._add_heartbeat(seq=1)
 
     def _add_heartbeat(self, seq=None):
@@ -240,7 +265,7 @@ class HeartbeatSim:
         if self.total_dist > 0:
             self.progress = min(1.0, self.traveled / self.total_dist)
 
-        # 强制检查是否到达终点（进度≥1或即将完成最后一段）
+        # 强制终点对齐
         if self.progress >= 1.0 or (self.path_idx >= len(self.path)-1 and self.traveled >= seg_len - 1e-9):
             self.current_pos = self.end_point[:]
             self.running = False
@@ -252,7 +277,6 @@ class HeartbeatSim:
             if self.path_idx < len(self.path)-1:
                 self.current_pos = self.path[self.path_idx][:]
             else:
-                # 最后一段，切到终点
                 self.current_pos = self.end_point[:]
                 self.running = False
                 return self._add_heartbeat(True)
@@ -288,8 +312,8 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
 
 # ------------------------------- 初始化状态 -------------------------------
 def init():
-    DEFAULT_A_GCJ = [118.746426, 32.232384]   # 新起点
-    DEFAULT_B_GCJ = [118.750966, 32.236290]   # 新终点
+    DEFAULT_A_GCJ = [118.746426, 32.232384]
+    DEFAULT_B_GCJ = [118.750966, 32.236290]
 
     defaults = {
         'page': '航线规划',
@@ -318,7 +342,7 @@ def main():
     st.title("🏫 南京科技职业学院 - 无人机地面站系统")
     init()
 
-    # 侧边栏导航
+    # 侧边栏
     with st.sidebar:
         st.header("📌 导航")
         selected_page = st.radio("功能页面", ["航线规划", "飞行监控", "障碍物管理"], index=["航线规划", "飞行监控", "障碍物管理"].index(st.session_state.page))
@@ -333,12 +357,11 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    # 障碍物管理页面
+    # 障碍物管理页面（略，与之前相同）
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.1 障碍物持久化版")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.1")
         st.info(f"📂 文件保存在程序同目录下，绝对路径如上所示")
-
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("💾 保存到文件", use_container_width=True):
@@ -356,7 +379,6 @@ def main():
         with col4:
             if st.button("🚀 一键部署", use_container_width=True):
                 st.info("此功能用于部署，示例中未实现")
-
         st.markdown("---")
         st.subheader("📥 下载配置文件到本地")
         if st.button("📥 下载 obstacle_config.json", use_container_width=True):
@@ -365,7 +387,6 @@ def main():
                     st.download_button("点击下载", data=f, file_name=CONFIG_FILE, mime="application/json")
             else:
                 st.warning("配置文件不存在，请先保存")
-
         st.markdown("---")
         st.subheader("➕ 添加新障碍物（手动输入顶点）")
         with st.form("add_obstacle_form"):
@@ -401,7 +422,6 @@ def main():
                     st.rerun()
                 else:
                     st.error("至少需要3个顶点")
-
         st.markdown("---")
         st.subheader(f"📋 当前障碍物列表 (共 {len(st.session_state.obstacles)} 个)")
         for idx, obs in enumerate(st.session_state.obstacles):
@@ -420,7 +440,6 @@ def main():
                         st.rerun()
                 with col_c:
                     st.code(json.dumps(obs.get('polygon', []), indent=2), language='json')
-
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -447,8 +466,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius
-                )
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
 
             st.markdown("#### 📍 终点 B")
@@ -464,8 +482,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius
-                )
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
 
             st.markdown("---")
@@ -476,8 +493,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, new_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius
-                )
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
                 st.rerun()
             new_speed = st.slider("速度系数 (%)", 10, 100, st.session_state.drone_speed, 5)
             st.session_state.drone_speed = new_speed
@@ -487,8 +503,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, new_radius
-                )
+                    st.session_state.avoid_direction, new_radius)
                 st.rerun()
 
             st.markdown("---")
@@ -499,8 +514,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
-                    direction, st.session_state.safety_radius
-                )
+                    direction, st.session_state.safety_radius)
                 st.rerun()
 
             st.markdown("---")
@@ -541,8 +555,7 @@ def main():
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius
-                )
+                    st.session_state.avoid_direction, st.session_state.safety_radius)
             drone_pos_gcj = None
             if st.session_state.flight_started and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
