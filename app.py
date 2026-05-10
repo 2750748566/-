@@ -14,24 +14,20 @@ GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
 
-# ------------------------------- 坐标转换函数（简化版，南京地区近似） ---------------------------------
+# ------------------------------- 坐标转换函数（简化版） ---------------------------------
 def wgs84_to_gcj02(lng, lat):
-    """WGS-84 转 GCJ-02（简化偏移，实际应使用更精确的算法）"""
     return lng + 0.006, lat + 0.002
 
 def gcj02_to_wgs84(lng, lat):
-    """GCJ-02 转 WGS-84（简化偏移）"""
     return lng - 0.006, lat - 0.002
 
 def transform_to_gcj02(lng, lat, from_coord):
-    """将输入坐标转换为 GCJ-02 存储"""
     if from_coord == "WGS-84":
         return wgs84_to_gcj02(lng, lat)
     else:
         return lng, lat
 
 def transform_to_display(lng, lat, to_coord):
-    """将存储的 GCJ-02 坐标转换为显示坐标"""
     if to_coord == "WGS-84":
         return gcj02_to_wgs84(lng, lat)
     else:
@@ -119,7 +115,6 @@ class HeartbeatSim:
                 self.current_pos = [lng, lat]
         return self._add_heartbeat()
 
-# ------------------------------- 地图创建 ---------------------------------
 def make_planning_map(center_gcj, points_gcj, flight_trail, plan_path, drone_pos_gcj, alt):
     m = folium.Map(location=[center_gcj[1], center_gcj[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
     if points_gcj.get('A'):
@@ -134,11 +129,10 @@ def make_planning_map(center_gcj, points_gcj, flight_trail, plan_path, drone_pos
         folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
     return m
 
-# ------------------------------- 初始化状态 -------------------------------
 def init():
     defaults = {
         'page': '航线规划',
-        'points_gcj': {'A': [118.746956, 32.232945], 'B': [118.751589, 32.235204]},  # 始终存储 GCJ-02
+        'points_gcj': {'A': [118.746956, 32.232945], 'B': [118.751589, 32.235204]},
         'sim': HeartbeatSim([118.746956, 32.232945]),
         'flight_started': False,
         'latest_hb': None,
@@ -147,13 +141,12 @@ def init():
         'plan_path': None,
         'flight_alt': 50,
         'drone_speed': 50,
-        'coord_sys': 'GCJ-02'   # 当前坐标系设置
+        'coord_sys': 'GCJ-02'
     }
-    for k,v in defaults.items():
+    for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-# ------------------------------- 主程序 -------------------------------
 def main():
     st.set_page_config(layout="wide")
     st.title("🏫 南京科技职业学院 - 无人机地面站 (心跳正比例图像)")
@@ -161,7 +154,10 @@ def main():
 
     with st.sidebar:
         st.header("📌 导航")
-        st.session_state.page = st.radio("功能页面", ["🗺️ 航线规划", "📡 飞行监控"])
+        # 关键修复：使用纯文本选项，与判断条件保持一致
+        selected_page = st.radio("功能页面", ["航线规划", "飞行监控"], index=0 if st.session_state.page == "航线规划" else 1)
+        st.session_state.page = selected_page
+        
         st.markdown("---")
         st.subheader("🗺️ 坐标系设置")
         coord_choice = st.radio(
@@ -183,7 +179,6 @@ def main():
         with col_panel:
             st.markdown("### 🎮 控制面板")
             st.markdown("#### 📍 起点 A")
-            # 根据当前坐标系显示转换后的值
             disp_a_lng, disp_a_lat = transform_to_display(
                 st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1],
                 st.session_state.coord_sys
@@ -194,7 +189,6 @@ def main():
             with col_a2:
                 a_lng = st.number_input("经度", value=disp_a_lng, format="%.6f", key="a_lng")
             if st.button("设置 A 点", use_container_width=True):
-                # 将用户输入转换为 GCJ-02 存储
                 gcj_lng, gcj_lat = transform_to_gcj02(a_lng, a_lat, st.session_state.coord_sys)
                 st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
                 st.session_state.plan_path = [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
@@ -266,7 +260,7 @@ def main():
                                   st.session_state.plan_path, drone_pos_gcj, st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
-    else:  # 飞行监控页面
+    else:
         st.header("📡 飞行监控 - 实时心跳包")
         st_autorefresh(interval=1000, key="monitor_auto")
 
@@ -274,7 +268,6 @@ def main():
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 每次页面刷新时，主动调用更新（模拟多个心跳）
         if st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -306,16 +299,15 @@ def main():
 
         st.markdown("---")
         st.subheader("💓 心跳序号 vs 飞行时间 (正比例关系)")
-
         history = st.session_state.sim.history
         if len(history) >= 2:
             times = [h.flight_time for h in history]
             seqs = [h.seq for h in history]
-            fig, ax = plt.subplots(figsize=(8, 5))
+            fig, ax = plt.subplots(figsize=(8,5))
             ax.plot(times, seqs, marker='o', markersize=4, linewidth=2, color='#1f77b4')
-            ax.set_xlabel('飞行时间 (秒)', fontsize=12)
-            ax.set_ylabel('心跳包序号', fontsize=12)
-            ax.set_title('心跳序号与飞行时间关系（正比例）', fontsize=14)
+            ax.set_xlabel('飞行时间 (秒)')
+            ax.set_ylabel('心跳包序号')
+            ax.set_title('心跳序号与飞行时间关系（正比例）')
             ax.grid(True, linestyle='--', alpha=0.6)
             st.pyplot(fig)
             plt.close(fig)
