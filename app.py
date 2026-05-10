@@ -56,7 +56,7 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v13.3'
+        'version': 'v13.4'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -117,9 +117,9 @@ def get_blocking_obstacles(start, end, obstacles, flight_alt):
                 blocking.append(obs)
     return blocking
 
-def get_all_obstacles_above_alt(obstacles, flight_alt):
-    """返回所有高度大于飞行高度的障碍物（无论是否阻挡直线）"""
-    return [obs for obs in obstacles if obs.get('height', 30) > flight_alt]
+def get_obstacles_above_threshold(obstacles, threshold):
+    """返回高度大于阈值threshold的障碍物列表"""
+    return [obs for obs in obstacles if obs.get('height', 30) > threshold]
 
 def meters_to_deg(meters, lat=32.23):
     lat_deg = meters / 111000
@@ -142,42 +142,43 @@ def compute_global_bounds(obstacles):
             max_lat = max(max_lat, p[1])
     return min_lng, max_lng, min_lat, max_lat
 
-# ------------------------------- 三个绕行算法（严格按方向，不因高度改变方向） ---------------------------------
+# ------------------------------- 绕行算法（统一阈值，保证低高度时路线与高高度一致） ---------------------------------
 def find_left_path_always(start, end, obstacles, flight_alt, safety_radius=5):
     """
-    向左绕行：始终生成一条从所有高于飞行高度的障碍物上方绕过的路径。
-    如果没有这样障碍物，则生成一个默认的上方凸起路径（偏移30米）。
+    向左绕行：始终从障碍物上方绕过。
+    使用高度阈值 = max(flight_alt, 60) 选择障碍物，确保低高度时仍考虑高度≥60的障碍物。
+    偏移量放大，确保安全。
     """
-    relevant = get_all_obstacles_above_alt(obstacles, flight_alt)
+    threshold = max(flight_alt, 60)
+    relevant = get_obstacles_above_threshold(obstacles, threshold)
     if relevant:
         _, _, _, max_lat = compute_global_bounds(relevant)
-        # 垂直安全偏移量：安全半径 * 8 米
-        safe_lat = meters_to_deg(safety_radius * 8)[1]
+        # 垂直安全偏移量：安全半径 * 12 米
+        safe_lat = meters_to_deg(safety_radius * 12)[1]
         y_offset = max_lat + safe_lat
     else:
-        # 默认偏移 30 米向上
-        safe_lat = meters_to_deg(30)[1]
-        # 取起点和终点中较大的纬度作为基准，再向上偏移
+        # 如果没有高度≥threshold的障碍物，则生成一个默认的上方凸起路径（偏移40米）
+        safe_lat = meters_to_deg(40)[1]
         base_lat = max(start[1], end[1])
         y_offset = base_lat + safe_lat
 
-    # 路径：起点 → 垂直向上到 (start[0], y_offset) → 水平向右到 (end[0], y_offset) → 垂直向下到终点
     waypoint_up = [start[0], y_offset]
     waypoint_right = [end[0], y_offset]
     return [start, waypoint_up, waypoint_right, end]
 
 def find_right_path_always(start, end, obstacles, flight_alt, safety_radius=5):
     """
-    向右绕行：始终生成一条从所有高于飞行高度的障碍物下方绕过的路径。
-    如果没有这样障碍物，则生成一个默认的下方凸起路径（偏移30米）。
+    向右绕行：始终从障碍物下方绕过。
+    使用高度阈值 = max(flight_alt, 60) 选择障碍物。
     """
-    relevant = get_all_obstacles_above_alt(obstacles, flight_alt)
+    threshold = max(flight_alt, 60)
+    relevant = get_obstacles_above_threshold(obstacles, threshold)
     if relevant:
         _, _, min_lat, _ = compute_global_bounds(relevant)
-        safe_lat = meters_to_deg(safety_radius * 8)[1]
+        safe_lat = meters_to_deg(safety_radius * 12)[1]
         y_offset = min_lat - safe_lat
     else:
-        safe_lat = meters_to_deg(30)[1]
+        safe_lat = meters_to_deg(40)[1]
         base_lat = min(start[1], end[1])
         y_offset = base_lat - safe_lat
 
@@ -370,7 +371,7 @@ def main():
     # 障碍物管理页面（完整）
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.3")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.4")
         st.info("📂 文件保存在程序同目录下，绝对路径如上所示")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
