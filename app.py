@@ -1,11 +1,13 @@
 import streamlit as st
-import time
+import folium
+from streamlit_folium import folium_static
+import json
+import os
 import math
+import time
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
-import folium
-from streamlit_folium import folium_static
 from streamlit_autorefresh import st_autorefresh
 
 # ------------------------------- 配置 ---------------------------------
@@ -13,8 +15,9 @@ SCHOOL_CENTER_GCJ = [118.749413, 32.234097]   # 学校中心（GCJ-02）
 GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
 HEARTBEAT_INTERVAL = 0.2
 BASE_SPEED = 5.0
+CONFIG_FILE = "obstacle_config.json"         # 障碍物配置文件
 
-# ------------------------------- 坐标转换函数（简化版） ---------------------------------
+# ------------------------------- 坐标转换函数 ---------------------------------
 def wgs84_to_gcj02(lng, lat):
     return lng + 0.006, lat + 0.002
 
@@ -24,14 +27,39 @@ def gcj02_to_wgs84(lng, lat):
 def transform_to_gcj02(lng, lat, from_coord):
     if from_coord == "WGS-84":
         return wgs84_to_gcj02(lng, lat)
-    else:
-        return lng, lat
+    return lng, lat
 
 def transform_to_display(lng, lat, to_coord):
     if to_coord == "WGS-84":
         return gcj02_to_wgs84(lng, lat)
-    else:
-        return lng, lat
+    return lng, lat
+
+# ------------------------------- 障碍物管理 ---------------------------------
+def load_obstacles():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                obstacles = data.get('obstacles', [])
+                for obs in obstacles:
+                    if 'height' not in obs:
+                        obs['height'] = 30
+                    if 'selected' not in obs:
+                        obs['selected'] = False
+                return obstacles
+        except:
+            return []
+    return []
+
+def save_obstacles(obstacles):
+    data = {
+        'obstacles': obstacles,
+        'count': len(obstacles),
+        'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'version': 'v13.0'
+    }
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ------------------------------- 心跳模拟器 ---------------------------------
 class HeartbeatData:
@@ -89,7 +117,6 @@ class HeartbeatSim:
         else:
             dt = min(HEARTBEAT_INTERVAL, now - self.last_update) if (now - self.last_update) > 0 else HEARTBEAT_INTERVAL
         self.last_update = now
-
         start = self.path[self.path_idx]
         end = self.path[self.path_idx+1]
         seg_len = math.dist(start, end)
@@ -98,7 +125,6 @@ class HeartbeatSim:
         self.traveled += move
         if self.total_dist > 0:
             self.progress = min(1.0, self.traveled / self.total_dist)
-
         if self.traveled >= seg_len and self.traveled > 0:
             self.path_idx += 1
             self.traveled = 0
@@ -115,20 +141,34 @@ class HeartbeatSim:
                 self.current_pos = [lng, lat]
         return self._add_heartbeat()
 
-def make_planning_map(center_gcj, points_gcj, flight_trail, plan_path, drone_pos_gcj, alt):
+# ------------------------------- 地图创建（含障碍物） ---------------------------------
+def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt):
     m = folium.Map(location=[center_gcj[1], center_gcj[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
+    # 绘制障碍物
+    for obs in obstacles:
+        coords = obs.get('polygon', [])
+        height = obs.get('height', 30)
+        if coords and len(coords) >= 3:
+            color = "red" if height > flight_alt else "orange"
+            folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.4,
+                           popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)
+    # 起点/终点
     if points_gcj.get('A'):
         folium.Marker([points_gcj['A'][1], points_gcj['A'][0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
     if points_gcj.get('B'):
         folium.Marker([points_gcj['B'][1], points_gcj['B'][0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
-    if plan_path and len(plan_path)>1:
+    # 规划路径
+    if plan_path and len(plan_path) > 1:
         folium.PolyLine([[p[1],p[0]] for p in plan_path], color='green', weight=4).add_to(m)
+    # 历史轨迹
     if flight_trail:
         folium.PolyLine([[lat,lng] for lng,lat in flight_trail[-100:]], color='orange', weight=2).add_to(m)
+    # 无人机当前位置
     if drone_pos_gcj:
         folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
     return m
 
+# ------------------------------- 初始化状态 ---------------------------------
 def init():
     defaults = {
         'page': '航线规划',
@@ -141,30 +181,28 @@ def init():
         'plan_path': None,
         'flight_alt': 50,
         'drone_speed': 50,
-        'coord_sys': 'GCJ-02'
+        'coord_sys': 'GCJ-02',
+        'obstacles': load_obstacles(),
+        'pending_obstacle': None
     }
-    for k, v in defaults.items():
+    for k,v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+# ------------------------------- 主程序 -------------------------------
 def main():
-    st.set_page_config(layout="wide")
-    st.title("🏫 南京科技职业学院 - 无人机地面站 (心跳正比例图像)")
+    st.set_page_config(page_title="南京科技职业学院 - 无人机地面站", layout="wide")
+    st.title("🏫 南京科技职业学院 - 无人机地面站系统")
     init()
 
+    # 侧边栏导航
     with st.sidebar:
         st.header("📌 导航")
-        # 关键修复：使用纯文本选项，与判断条件保持一致
-        selected_page = st.radio("功能页面", ["航线规划", "飞行监控"], index=0 if st.session_state.page == "航线规划" else 1)
+        selected_page = st.radio("功能页面", ["航线规划", "飞行监控", "障碍物管理"], index=["航线规划", "飞行监控", "障碍物管理"].index(st.session_state.page))
         st.session_state.page = selected_page
-        
         st.markdown("---")
         st.subheader("🗺️ 坐标系设置")
-        coord_choice = st.radio(
-            "输入坐标系",
-            ["WGS-84", "GCJ-02(高德/百度)"],
-            index=0 if st.session_state.coord_sys == "WGS-84" else 1
-        )
+        coord_choice = st.radio("输入坐标系", ["WGS-84", "GCJ-02(高德/百度)"], index=0 if st.session_state.coord_sys=="WGS-84" else 1)
         st.session_state.coord_sys = "WGS-84" if coord_choice == "WGS-84" else "GCJ-02"
         st.markdown("---")
         st.subheader("📊 系统状态")
@@ -172,17 +210,111 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    if st.session_state.page == "航线规划":
+    # 障碍物管理页面
+    if st.session_state.page == "障碍物管理":
+        st.header("🚧 障碍物配置持久化")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.0 障碍物持久化版")
+        st.info(f"📂 文件保存在程序同目录下，绝对路径如上所示")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if st.button("💾 保存到文件", use_container_width=True):
+                save_obstacles(st.session_state.obstacles)
+                st.success("保存成功")
+        with col2:
+            if st.button("📂 从文件加载", use_container_width=True):
+                st.session_state.obstacles = load_obstacles()
+                st.rerun()
+        with col3:
+            if st.button("🗑️ 清除全部", use_container_width=True):
+                st.session_state.obstacles = []
+                save_obstacles([])
+                st.rerun()
+        with col4:
+            if st.button("🚀 一键部署", use_container_width=True):
+                st.info("此功能用于部署，示例中未实现")
+
+        st.markdown("---")
+        st.subheader("📥 下载配置文件到本地")
+        if st.button("📥 下载 obstacle_config.json", use_container_width=True):
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'rb') as f:
+                    st.download_button("点击下载", data=f, file_name=CONFIG_FILE, mime="application/json")
+            else:
+                st.warning("配置文件不存在，请先保存")
+
+        st.markdown("---")
+        st.subheader("➕ 添加新障碍物")
+        with st.form("add_obstacle_form"):
+            obs_name = st.text_input("障碍物名称", "新障碍物")
+            obs_height = st.number_input("高度 (米)", min_value=1, max_value=200, value=30, step=5)
+            st.markdown("#### 顶点坐标 (经度,纬度) 每行一个，格式: 118.749,32.234")
+            vertices_text = st.text_area("顶点列表", placeholder="118.746956,32.232945\n118.747500,32.233000\n118.747200,32.233500")
+            submitted = st.form_submit_button("✅ 添加障碍物")
+            if submitted and vertices_text.strip():
+                vertices = []
+                for line in vertices_text.strip().split('\n'):
+                    if ',' in line:
+                        parts = line.split(',')
+                        try:
+                            lng = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            vertices.append([lng, lat])
+                        except:
+                            pass
+                if len(vertices) >= 3:
+                    # 转换为内部存储的 GCJ-02（如果当前坐标系为 WGS-84，则转换）
+                    if st.session_state.coord_sys == "WGS-84":
+                        vertices = [list(wgs84_to_gcj02(lng, lat)) for lng, lat in vertices]
+                    new_obs = {
+                        "name": obs_name,
+                        "polygon": vertices,
+                        "height": obs_height,
+                        "selected": False,
+                        "id": f"obs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    }
+                    st.session_state.obstacles.append(new_obs)
+                    save_obstacles(st.session_state.obstacles)
+                    st.success(f"已添加 {obs_name}")
+                    st.rerun()
+                else:
+                    st.error("至少需要3个顶点")
+
+        st.markdown("---")
+        st.subheader(f"📋 当前障碍物列表 (共 {len(st.session_state.obstacles)} 个)")
+        for idx, obs in enumerate(st.session_state.obstacles):
+            with st.expander(f"{obs.get('name', '未命名')} | 高度: {obs.get('height',30)}m"):
+                col_a, col_b, col_c = st.columns([1,1,2])
+                with col_a:
+                    new_h = st.number_input("调整高度", value=obs.get('height',30), key=f"h_{idx}", step=5)
+                    if new_h != obs.get('height',30):
+                        obs['height'] = new_h
+                        save_obstacles(st.session_state.obstacles)
+                        st.rerun()
+                with col_b:
+                    if st.button("🗑️ 删除", key=f"del_{idx}"):
+                        st.session_state.obstacles.pop(idx)
+                        save_obstacles(st.session_state.obstacles)
+                        st.rerun()
+                with col_c:
+                    st.code(json.dumps(obs.get('polygon', []), indent=2), language='json')
+
+        st.markdown("---")
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            save_time = data.get('save_time', '未知')
+            st.info(f"📁 文件状态: 共 {len(data.get('obstacles', []))} 个障碍物 | 保存时间: {save_time} | 版本: {data.get('version', '未知')}")
+            st.text(f"路径: {os.path.abspath(CONFIG_FILE)}")
+
+    # 航线规划页面
+    elif st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划")
         col_map, col_panel = st.columns([3, 1.2])
-
         with col_panel:
             st.markdown("### 🎮 控制面板")
             st.markdown("#### 📍 起点 A")
-            disp_a_lng, disp_a_lat = transform_to_display(
-                st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1],
-                st.session_state.coord_sys
-            )
+            disp_a_lng, disp_a_lat = transform_to_display(st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1], st.session_state.coord_sys)
             col_a1, col_a2 = st.columns(2)
             with col_a1:
                 a_lat = st.number_input("纬度", value=disp_a_lat, format="%.6f", key="a_lat")
@@ -193,12 +325,8 @@ def main():
                 st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
                 st.session_state.plan_path = [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
                 st.rerun()
-
             st.markdown("#### 📍 终点 B")
-            disp_b_lng, disp_b_lat = transform_to_display(
-                st.session_state.points_gcj['B'][0], st.session_state.points_gcj['B'][1],
-                st.session_state.coord_sys
-            )
+            disp_b_lng, disp_b_lat = transform_to_display(st.session_state.points_gcj['B'][0], st.session_state.points_gcj['B'][1], st.session_state.coord_sys)
             col_b1, col_b2 = st.columns(2)
             with col_b1:
                 b_lat = st.number_input("纬度", value=disp_b_lat, format="%.6f", key="b_lat")
@@ -209,7 +337,6 @@ def main():
                 st.session_state.points_gcj['B'] = [gcj_lng, gcj_lat]
                 st.session_state.plan_path = [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
                 st.rerun()
-
             st.markdown("---")
             st.subheader("✈️ 飞行参数")
             new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
@@ -218,7 +345,6 @@ def main():
                 st.rerun()
             new_speed = st.slider("速度系数 (%)", 10, 100, st.session_state.drone_speed, 5)
             st.session_state.drone_speed = new_speed
-
             st.markdown("---")
             col_start, col_stop = st.columns(2)
             with col_start:
@@ -244,7 +370,6 @@ def main():
                         st.session_state.sim.running = False
                     st.info("飞行已停止")
                     st.rerun()
-
             if st.session_state.flight_started and st.session_state.latest_hb:
                 hb = st.session_state.latest_hb
                 st.metric("实时进度", f"{st.session_state.sim.progress*100:.1f}%")
@@ -256,18 +381,18 @@ def main():
             drone_pos_gcj = None
             if st.session_state.flight_started and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
-            m = make_planning_map(SCHOOL_CENTER_GCJ, st.session_state.points_gcj, st.session_state.flight_trail,
-                                  st.session_state.plan_path, drone_pos_gcj, st.session_state.flight_alt)
+            m = create_planning_map(SCHOOL_CENTER_GCJ, st.session_state.points_gcj, st.session_state.obstacles,
+                                    st.session_state.flight_trail, st.session_state.plan_path, drone_pos_gcj,
+                                    st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
+    # 飞行监控页面
     else:
         st.header("📡 飞行监控 - 实时心跳包")
         st_autorefresh(interval=1000, key="monitor_auto")
-
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
-
         if st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -282,21 +407,17 @@ def main():
                         st.session_state.flight_trail.pop(0)
                 else:
                     break
-
         if st.session_state.latest_hb is None:
             st.warning("等待第一个心跳...")
             st.stop()
-
         hb = st.session_state.latest_hb
         progress_val = st.session_state.sim.progress
         st.progress(progress_val, text=f"飞行进度：{progress_val*100:.1f}%")
-
         col1, col2, col3, col4 = st.columns(4)
         with col1: st.metric("飞行时间", f"{hb.flight_time:.1f} s")
         with col2: st.metric("当前心跳序号", hb.seq)
         with col3: st.metric("飞行高度", f"{st.session_state.flight_alt} m")
         with col4: st.metric("速度系数", f"{st.session_state.drone_speed}%")
-
         st.markdown("---")
         st.subheader("💓 心跳序号 vs 飞行时间 (正比例关系)")
         history = st.session_state.sim.history
@@ -304,16 +425,15 @@ def main():
             times = [h.flight_time for h in history]
             seqs = [h.seq for h in history]
             fig, ax = plt.subplots(figsize=(8,5))
-            ax.plot(times, seqs, marker='o', markersize=4, linewidth=2, color='#1f77b4')
+            ax.plot(times, seqs, marker='o', markersize=4, linewidth=2)
             ax.set_xlabel('飞行时间 (秒)')
             ax.set_ylabel('心跳包序号')
             ax.set_title('心跳序号与飞行时间关系（正比例）')
-            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.grid(True)
             st.pyplot(fig)
             plt.close(fig)
         else:
             st.info(f"等待更多心跳数据... (当前 {len(history)} 个)")
-
         st.markdown("---")
         st.subheader("📈 实时趋势")
         if len(st.session_state.hb_list) > 1:
