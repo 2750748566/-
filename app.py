@@ -98,7 +98,7 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
-    if point_in_polygon(p1, polygon) or point_in_polygon(p2, polynomial):
+    if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
     for i in range(n):
@@ -173,7 +173,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
     else:
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-# ------------------------------- 心跳模拟器（修改为拐点停留模式） ---------------------------------
+# ------------------------------- 心跳模拟器（拐点停留模式） ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -190,14 +190,14 @@ class HeartbeatSim:
         self.running = False
         self.progress = 0.0
         self.total_dist = 0.0
-        self.traveled = 0.0   # 保留，但不再用于位置计算
+        self.traveled = 0.0   # 保留备用
         self.start_time = None
         self.last_update = None
         self.history = []
         self.speed_pct = 50
         self.altitude = 50
         self.end_point = None
-        self.total_time = 0.0   # 总飞行时间
+        self.total_time = 0.0
 
     def set_path(self, path, altitude, speed_pct):
         self.path = path[:]
@@ -213,7 +213,6 @@ class HeartbeatSim:
         self.altitude = altitude
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
         self.end_point = path[-1][:]
-        # 计算总飞行时间（秒）
         speed = BASE_SPEED * (self.speed_pct / 100.0)
         self.total_time = self.total_dist / speed if speed > 0 else 0.001
         self._add_heartbeat(seq=1)
@@ -543,17 +542,17 @@ def main():
                                     st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
-    # 飞行监控页面（保留自动刷新，观察拐点停留）
+    # 飞行监控页面
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
-        # 自动刷新间隔3秒，让用户能观察到无人机停留在拐点一段时间
+        # 自动刷新间隔3秒，降低地图跳动
         st_autorefresh(interval=3000, key="monitor_auto")
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 更新飞行模拟（需要多次调用以维持心跳频率，但位置更新已改为基于时间的阶梯式）
+        # 更新飞行模拟
         if not st.session_state.flight_paused and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -585,7 +584,7 @@ def main():
         remaining_dist = max(0, (1 - progress) * st.session_state.sim.total_dist * 111000)
         eta_sec = remaining_dist / speed if speed > 0 else 0
 
-        # 控制按钮行
+        # 控制按钮
         col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
         with col_btn1:
             if st.button("▶️ 开始任务", use_container_width=True):
@@ -620,7 +619,7 @@ def main():
                 else:
                     st.error("请先在航线规划页面设置路径")
 
-        # 仪表盘区域
+        # 仪表盘
         col_left, col_right = st.columns([1, 1.5])
         with col_left:
             st.markdown("### 📊 任务状态")
