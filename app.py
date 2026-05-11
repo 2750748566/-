@@ -540,11 +540,11 @@ def main():
                                     st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
-    # 飞行监控页面（增强版）
+    # 飞行监控页面（降低地图刷新频率，减小跳动）
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
-        # 自动刷新（每秒）
-        st_autorefresh(interval=1000, key="monitor_auto")
+        # 自动刷新间隔改为3秒（原为1秒），地图重建频率降低，跳动感大幅减弱
+        st_autorefresh(interval=3000, key="monitor_auto")
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
@@ -573,7 +573,6 @@ def main():
         hb = st.session_state.latest_hb
         progress = st.session_state.sim.progress
         total_waypoints = len(st.session_state.sim.path)
-        # 当进度达到100%时，当前航点显示为总航点数；否则为 path_idx+1（但不超过总航点数）
         if progress >= 1.0:
             current_waypoint = total_waypoints
         else:
@@ -632,8 +631,7 @@ def main():
             eta_min = int(eta_sec // 60)
             eta_sec_int = int(eta_sec % 60)
             st.metric("预计到达", f"{eta_min:02d}:{eta_sec_int:02d}")
-            # 电量模拟固定为40%
-            st.metric("电量模拟", f"40%")
+            st.metric("电量模拟", "40%")
 
             st.markdown("---")
             st.markdown("### 📡 通信链路拓扑与数据流")
