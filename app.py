@@ -98,7 +98,7 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
-    if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
+    if point_in_polygon(p1, polygon) or point_in_polygon(p2, polynomial):
         return True
     n = len(polygon)
     for i in range(n):
@@ -173,7 +173,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
     else:
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-# ------------------------------- 心跳模拟器 ---------------------------------
+# ------------------------------- 心跳模拟器（修改为拐点停留模式） ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -190,13 +190,14 @@ class HeartbeatSim:
         self.running = False
         self.progress = 0.0
         self.total_dist = 0.0
-        self.traveled = 0.0
+        self.traveled = 0.0   # 保留，但不再用于位置计算
         self.start_time = None
         self.last_update = None
         self.history = []
         self.speed_pct = 50
         self.altitude = 50
         self.end_point = None
+        self.total_time = 0.0   # 总飞行时间
 
     def set_path(self, path, altitude, speed_pct):
         self.path = path[:]
@@ -212,6 +213,9 @@ class HeartbeatSim:
         self.altitude = altitude
         self.total_dist = sum(distance(self.path[i], self.path[i+1]) for i in range(len(self.path)-1))
         self.end_point = path[-1][:]
+        # 计算总飞行时间（秒）
+        speed = BASE_SPEED * (self.speed_pct / 100.0)
+        self.total_time = self.total_dist / speed if speed > 0 else 0.001
         self._add_heartbeat(seq=1)
 
     def _add_heartbeat(self, seq=None, arrived=False):
@@ -232,35 +236,34 @@ class HeartbeatSim:
             dt = min(HEARTBEAT_INTERVAL, now - self.last_update) if (now - self.last_update) > 0 else HEARTBEAT_INTERVAL
         self.last_update = now
 
-        start = self.path[self.path_idx]
-        end = self.path[self.path_idx+1]
-        seg_len = distance(start, end)
-        speed = BASE_SPEED * (self.speed_pct / 100.0)
-        move = speed * dt
-        self.traveled += move
+        # 根据实际经过的时间计算进度
+        elapsed = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
+        self.progress = min(1.0, elapsed / self.total_time)
+        
+        # 计算当前应处的航点索引（阶梯式停留）
+        N = len(self.path)
+        if N <= 1:
+            idx = 0
+        else:
+            # 当 progress<1 时，停留在第 floor(progress*(N-1)) 个点
+            # 当 progress=1 时，停留在最后一个点
+            seg_idx = int(self.progress * (N - 1))
+            idx = min(seg_idx, N - 1)
+        self.path_idx = idx
+        self.current_pos = self.path[idx][:]
+        
+        # 更新 traveled（用于其他可能的计算）
         if self.total_dist > 0:
-            self.progress = min(1.0, self.traveled / self.total_dist)
-
-        if self.progress >= 1.0 or (self.path_idx >= len(self.path)-1 and self.traveled >= seg_len - 1e-9):
+            self.traveled = self.progress * self.total_dist
+        else:
+            self.traveled = 0.0
+        
+        # 检查是否到达终点
+        if self.progress >= 1.0 and self.running:
             self.current_pos = self.end_point[:]
             self.running = False
             return self._add_heartbeat(arrived=True)
-
-        if self.traveled >= seg_len and self.traveled > 0:
-            self.path_idx += 1
-            self.traveled = 0
-            if self.path_idx < len(self.path)-1:
-                self.current_pos = self.path[self.path_idx][:]
-            else:
-                self.current_pos = self.end_point[:]
-                self.running = False
-                return self._add_heartbeat(arrived=True)
-        else:
-            if seg_len > 0:
-                t = max(0, min(1, self.traveled / seg_len))
-                lng = start[0] + (end[0]-start[0])*t
-                lat = start[1] + (end[1]-start[1])*t
-                self.current_pos = [lng, lat]
+        
         return self._add_heartbeat()
 
 # ------------------------------- 地图创建 ---------------------------------
@@ -540,17 +543,17 @@ def main():
                                     st.session_state.flight_alt)
             folium_static(m, width=700, height=550)
 
-    # 飞行监控页面（降低地图刷新频率，减小跳动）
+    # 飞行监控页面（保留自动刷新，观察拐点停留）
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
-        # 自动刷新间隔改为3秒（原为1秒），地图重建频率降低，跳动感大幅减弱
+        # 自动刷新间隔3秒，让用户能观察到无人机停留在拐点一段时间
         st_autorefresh(interval=3000, key="monitor_auto")
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 更新飞行模拟（如果不处于暂停状态）
+        # 更新飞行模拟（需要多次调用以维持心跳频率，但位置更新已改为基于时间的阶梯式）
         if not st.session_state.flight_paused and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
