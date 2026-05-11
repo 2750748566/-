@@ -97,7 +97,7 @@ def segments_intersect(p1, p2, p3, p4):
     if o4==0 and on_segment(p3,p2,p4): return True
     return False
 
-def line_intersects_polygon(p1, p2, polygon):
+def line_intersects_polygon(p1, p2, polygon):   # 修复：参数名改为 polygon
     if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
@@ -173,7 +173,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
     else:
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
-# ------------------------------- 心跳模拟器（拐点停留模式） ---------------------------------
+# ------------------------------- 心跳模拟器（拐点停留版本） ---------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
         self.flight_time = flight_time
@@ -190,7 +190,7 @@ class HeartbeatSim:
         self.running = False
         self.progress = 0.0
         self.total_dist = 0.0
-        self.traveled = 0.0   # 保留备用
+        self.traveled = 0.0
         self.start_time = None
         self.last_update = None
         self.history = []
@@ -235,39 +235,26 @@ class HeartbeatSim:
             dt = min(HEARTBEAT_INTERVAL, now - self.last_update) if (now - self.last_update) > 0 else HEARTBEAT_INTERVAL
         self.last_update = now
 
-        # 根据实际经过的时间计算进度
         elapsed = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
         self.progress = min(1.0, elapsed / self.total_time)
         
-        # 计算当前应处的航点索引（阶梯式停留）
         N = len(self.path)
-        if N <= 1:
-            idx = 0
-        else:
-            # 当 progress<1 时，停留在第 floor(progress*(N-1)) 个点
-            # 当 progress=1 时，停留在最后一个点
-            seg_idx = int(self.progress * (N - 1))
-            idx = min(seg_idx, N - 1)
-        self.path_idx = idx
-        self.current_pos = self.path[idx][:]
-        
-        # 更新 traveled（用于其他可能的计算）
-        if self.total_dist > 0:
-            self.traveled = self.progress * self.total_dist
-        else:
-            self.traveled = 0.0
-        
-        # 检查是否到达终点
-        if self.progress >= 1.0 and self.running:
-            self.current_pos = self.end_point[:]
+        if self.progress >= 1.0:
+            idx = N - 1
+            self.current_pos = self.path[idx][:]
             self.running = False
             return self._add_heartbeat(arrived=True)
-        
+        else:
+            idx = int(self.progress * (N - 1))
+            self.current_pos = self.path[idx][:]
+        self.path_idx = idx
+        self.traveled = self.progress * self.total_dist
         return self._add_heartbeat()
 
 # ------------------------------- 地图创建 ---------------------------------
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt):
     m = folium.Map(location=[center_gcj[1], center_gcj[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
+    # 障碍物
     for obs in obstacles:
         coords = obs.get('polygon', [])
         height = obs.get('height', 30)
@@ -275,14 +262,18 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
             color = "red" if height > flight_alt else "orange"
             folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.4,
                            popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)
+    # 起点/终点
     if points_gcj.get('A'):
         folium.Marker([points_gcj['A'][1], points_gcj['A'][0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
     if points_gcj.get('B'):
         folium.Marker([points_gcj['B'][1], points_gcj['B'][0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
+    # 规划路径（绿色）
     if plan_path and len(plan_path) > 1:
         folium.PolyLine([[p[1],p[0]] for p in plan_path], color='green', weight=4).add_to(m)
+    # 历史轨迹（橙色）
     if flight_trail:
         folium.PolyLine([[lat,lng] for lng,lat in flight_trail[-100:]], color='orange', weight=2).add_to(m)
+    # 当前位置
     if drone_pos_gcj:
         folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
     return m
@@ -334,7 +325,7 @@ def main():
         st.checkbox("B点已设", value=st.session_state.points_gcj.get('B') is not None, disabled=True)
         st.checkbox("飞行进行中", value=st.session_state.flight_started, disabled=True)
 
-    # 障碍物管理页面（完整）
+    # 障碍物管理页面
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
         st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.2")
@@ -545,14 +536,12 @@ def main():
     # 飞行监控页面
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
-        # 自动刷新间隔3秒，降低地图跳动
         st_autorefresh(interval=3000, key="monitor_auto")
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始。请切换到「航线规划」页面，设置起点终点后点击「开始飞行」。")
             st.stop()
 
-        # 更新飞行模拟
         if not st.session_state.flight_paused and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -575,16 +564,12 @@ def main():
         hb = st.session_state.latest_hb
         progress = st.session_state.sim.progress
         total_waypoints = len(st.session_state.sim.path)
-        if progress >= 1.0:
-            current_waypoint = total_waypoints
-        else:
-            current_waypoint = min(st.session_state.sim.path_idx + 1, total_waypoints)
+        current_waypoint = min(st.session_state.sim.path_idx + 1, total_waypoints) if progress < 1.0 else total_waypoints
         speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
         elapsed = hb.flight_time
         remaining_dist = max(0, (1 - progress) * st.session_state.sim.total_dist * 111000)
         eta_sec = remaining_dist / speed if speed > 0 else 0
 
-        # 控制按钮
         col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
         with col_btn1:
             if st.button("▶️ 开始任务", use_container_width=True):
@@ -619,7 +604,6 @@ def main():
                 else:
                     st.error("请先在航线规划页面设置路径")
 
-        # 仪表盘
         col_left, col_right = st.columns([1, 1.5])
         with col_left:
             st.markdown("### 📊 任务状态")
