@@ -571,11 +571,13 @@ def main():
             st.stop()
 
         hb = st.session_state.latest_hb
-        # 关键修复：进度直接从 sim 对象获取，而不是从 hb（HeartbeatData 没有 progress 属性）
         progress = st.session_state.sim.progress
-        # 当前航点索引（1-indexed）
-        current_waypoint = st.session_state.sim.path_idx + 1
         total_waypoints = len(st.session_state.sim.path)
+        # 当进度达到100%时，当前航点显示为总航点数；否则为 path_idx+1（但不超过总航点数）
+        if progress >= 1.0:
+            current_waypoint = total_waypoints
+        else:
+            current_waypoint = min(st.session_state.sim.path_idx + 1, total_waypoints)
         speed = BASE_SPEED * (st.session_state.drone_speed / 100.0)
         elapsed = hb.flight_time
         remaining_dist = max(0, (1 - progress) * st.session_state.sim.total_dist * 111000)
@@ -586,14 +588,12 @@ def main():
         with col_btn1:
             if st.button("▶️ 开始任务", use_container_width=True):
                 if not st.session_state.flight_started:
-                    # 重新开始
                     st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
                     st.session_state.sim.set_path(st.session_state.plan_path, st.session_state.flight_alt, st.session_state.drone_speed)
                     st.session_state.flight_started = True
                     st.session_state.flight_paused = False
                     st.rerun()
                 else:
-                    # 恢复
                     st.session_state.flight_paused = False
                     st.rerun()
         with col_btn2:
@@ -632,12 +632,11 @@ def main():
             eta_min = int(eta_sec // 60)
             eta_sec_int = int(eta_sec % 60)
             st.metric("预计到达", f"{eta_min:02d}:{eta_sec_int:02d}")
-            battery = max(0, 100 - int(progress * 100))
-            st.metric("电量模拟", f"{battery}%")
+            # 电量模拟固定为40%
+            st.metric("电量模拟", f"40%")
 
             st.markdown("---")
             st.markdown("### 📡 通信链路拓扑与数据流")
-            # 动态模拟链路状态
             if progress < 1:
                 delay = random.uniform(20, 35)
                 loss = random.uniform(0, 0.5)
@@ -659,7 +658,6 @@ def main():
             a = st.session_state.points_gcj['A']
             b = st.session_state.points_gcj['B']
             m = folium.Map(location=[center[1], center[0]], zoom_start=18, tiles=GAODE_TILE, attr='高德')
-            # 障碍物
             for obs in st.session_state.obstacles:
                 coords = obs.get('polygon', [])
                 height = obs.get('height', 30)
@@ -667,16 +665,12 @@ def main():
                     color = "red" if height > st.session_state.flight_alt else "orange"
                     folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.4,
                                    popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)
-            # 起点终点
             folium.Marker([a[1], a[0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
             folium.Marker([b[1], b[0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
-            # 规划路径
             if st.session_state.plan_path:
                 folium.PolyLine([[p[1],p[0]] for p in st.session_state.plan_path], color='green', weight=4).add_to(m)
-            # 历史轨迹
             if st.session_state.flight_trail:
                 folium.PolyLine([[lat,lng] for lng,lat in st.session_state.flight_trail[-100:]], color='orange', weight=2).add_to(m)
-            # 当前位置
             folium.Marker([center[1], center[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
             folium_static(m, width=700, height=500)
 
