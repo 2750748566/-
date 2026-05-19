@@ -1,6 +1,6 @@
 import streamlit as st
 import folium
-from streamlit_folium import st_folium, folium_static   # 修改：增加 folium_static 导入
+from streamlit_folium import st_folium, folium_static
 import json
 import os
 import math
@@ -298,7 +298,7 @@ def init():
         'pending_obstacle': None,
         'flight_paused': False,
         'point_select_mode': 'A',
-        'pending_click_point': None,      # 修改点1：暂存鼠标点击坐标
+        'pending_click_point': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -414,14 +414,13 @@ def main():
             st.info(f"📁 文件状态: 共 {len(data.get('obstacles', []))} 个障碍物 | 保存时间: {save_time} | 版本: {data.get('version', '未知')}")
             st.text(f"路径: {os.path.abspath(CONFIG_FILE)}")
 
-    # ------------------------------- 航线规划页面（含鼠标点击选点+确定按钮）------------------------------------
+    # ------------------------------- 航线规划页面 ----------------------------------------
     elif st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划")
         col_map, col_panel = st.columns([3, 1.2])
 
         with col_panel:
             st.markdown("### 🎮 控制面板")
-            # ---------- 鼠标选点模式选择 ----------
             st.markdown("#### 🖱️ 点击地图设置")
             if st.session_state.flight_started:
                 st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
@@ -430,7 +429,6 @@ def main():
                 select_mode = st.radio("选点模式", ["设置起点(A)", "设置终点(B)"], index=0 if st.session_state.point_select_mode=='A' else 1)
                 st.session_state.point_select_mode = 'A' if select_mode == "设置起点(A)" else 'B'
 
-            # 修改点2：新增“确定并规划航线”按钮
             st.markdown("#### ✅ 确认选点")
             if st.button("确定并规划航线", use_container_width=True):
                 if st.session_state.pending_click_point is not None:
@@ -565,16 +563,9 @@ def main():
                 st.session_state.flight_alt
             )
 
-            # 添加选点模式提示（可选，不影响点击）
-            mode_text = "当前: 点击设置起点(A)" if st.session_state.point_select_mode == 'A' else "当前: 点击设置终点(B)"
-            folium.Marker(
-                [SCHOOL_CENTER_GCJ[1]+0.001, SCHOOL_CENTER_GCJ[0]],
-                icon=folium.DivIcon(html=f'<div style="font-size:12pt; background:white; border:1px solid black; padding:2px;">{mode_text}</div>')
-            ).add_to(folium_map)
-
+            # 不再添加 DivIcon 提示，避免 JSON 序列化错误
             map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
 
-            # 修改点3：地图点击只暂存，不立即更新航点
             if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
                 lat_click = map_output["last_clicked"]["lat"]
                 lng_click = map_output["last_clicked"]["lng"]
