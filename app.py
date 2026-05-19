@@ -582,28 +582,14 @@ def main():
 
             # 处理地图点击事件（仅在未飞行时生效）
             if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
-                lat_click = map_output["last_clicked"]["lat"]   # WGS-84 纬度
-                lng_click = map_output["last_clicked"]["lng"]   # WGS-84 经度
-                # 坐标转换：WGS-84 → GCJ-02
+                lat_click = map_output["last_clicked"]["lat"]
+                lng_click = map_output["last_clicked"]["lng"]
                 gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
                 clicked_gcj = [gcj_lng, gcj_lat]
-                
-                # 更新起点或终点
-                if st.session_state.point_select_mode == 'A':
-                    st.session_state.points_gcj['A'] = clicked_gcj
-                    st.success(f"起点 A 已更新为: ({gcj_lng:.6f}, {gcj_lat:.6f})")
-                else:
-                    st.session_state.points_gcj['B'] = clicked_gcj
-                    st.success(f"终点 B 已更新为: ({gcj_lng:.6f}, {gcj_lat:.6f})")
-                
-                # 重新规划路径（只调用一次）
-                st.session_state.plan_path = create_avoidance_path(
-                    st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius
-                )
-                # 刷新页面（只调用一次）
-                st.rerun()
+                # 暂存坐标，不立即更新
+                st.session_state.pending_click_point = clicked_gcj
+                st.info(f"已暂存{'起点' if st.session_state.point_select_mode == 'A' else '终点'}：({gcj_lng:.6f}, {gcj_lat:.6f})，请点击「确定并规划航线」")
+                st.rerun()   # 刷新页面让 info 消息显示，并清空点击状态
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
