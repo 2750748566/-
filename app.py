@@ -296,6 +296,7 @@ def init():
         'coord_sys': 'GCJ-02',
         'obstacles': load_obstacles(),
         'pending_obstacle': None,
+        'pending_click_point': None,   # 新增：暂存鼠标点击的坐标 [lng, lat]
         'flight_paused': False,
         'point_select_mode': 'A',       # 新增：鼠标选点模式 A/B
     }
@@ -421,14 +422,36 @@ def main():
         with col_panel:
             st.markdown("### 🎮 控制面板")
             # ---------- 新增：鼠标选点模式选择 ----------
-            st.markdown("#### 🖱️ 点击地图设置")
-            if st.session_state.flight_started:
-                st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
-                select_mode = st.radio("选点模式", ["设置起点(A)", "设置终点(B)"], key="mode_disabled", disabled=True)
+    st.markdown("#### 🖱️ 点击地图设置")
+    if st.session_state.flight_started:
+        st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
+        select_mode = st.radio("选点模式", ["设置起点(A)", "设置终点(B)"], key="mode_disabled", disabled=True)
+    else:
+        select_mode = st.radio("选点模式", ["设置起点(A)", "设置终点(B)"], index=0 if st.session_state.point_select_mode=='A' else 1)
+        st.session_state.point_select_mode = 'A' if select_mode == "设置起点(A)" else 'B'
+    
+    # ----- 新增按钮 -----
+    st.markdown("#### ✅ 确认选点")
+    if st.button("确定并规划航线", use_container_width=True):
+        if st.session_state.pending_click_point is not None:
+            # 将暂存的坐标正式更新到 A 或 B
+            if st.session_state.point_select_mode == 'A':
+                st.session_state.points_gcj['A'] = st.session_state.pending_click_point
+                st.success(f"起点 A 已更新为: ({st.session_state.pending_click_point[0]:.6f}, {st.session_state.pending_click_point[1]:.6f})")
             else:
-                select_mode = st.radio("选点模式", ["设置起点(A)", "设置终点(B)"], index=0 if st.session_state.point_select_mode=='A' else 1)
-                st.session_state.point_select_mode = 'A' if select_mode == "设置起点(A)" else 'B'
-            st.markdown("---")
+                st.session_state.points_gcj['B'] = st.session_state.pending_click_point
+                st.success(f"终点 B 已更新为: ({st.session_state.pending_click_point[0]:.6f}, {st.session_state.pending_click_point[1]:.6f})")
+            # 重新规划航线
+            st.session_state.plan_path = create_avoidance_path(
+                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                st.session_state.obstacles, st.session_state.flight_alt,
+                st.session_state.avoid_direction, st.session_state.safety_radius
+            )
+            st.session_state.pending_click_point = None   # 清空暂存
+            st.rerun()
+        else:
+            st.warning("请先在地图上点击一个位置")
+    st.markdown("---")
 
             st.markdown("#### 📍 起点 A")
             disp_a_lng, disp_a_lat = transform_to_display(st.session_state.points_gcj['A'][0], st.session_state.points_gcj['A'][1], st.session_state.coord_sys)
