@@ -1,6 +1,6 @@
 import streamlit as st
 import folium
-from streamlit_folium import st_folium    # 新增交互地图支持
+from streamlit_folium import st_folium, folium_static   # 新增交互地图支持 + 静态地图
 import json
 import os
 import math
@@ -557,19 +557,27 @@ def main():
             # 使用 st_folium 获取交互信息
             map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
 
-            # 处理地图点击事件（仅在未飞行时生效）
-            if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
-                lat_click = map_output["last_clicked"]["lat"]
-                lng_click = map_output["last_clicked"]["lng"]
-                # st_folium 返回的是 [lat, lng] -> 转为 [lng, lat] 存储
-                clicked_gcj = [lng_click, lat_click]
-                # 根据当前模式更新起点或终点
-                if st.session_state.point_select_mode == 'A':
-                    # 更新A点
-                    st.session_state.points_gcj['A'] = clicked_gcj
-                else:
-                    st.session_state.points_gcj['B'] = clicked_gcj
-                # 重新规划路径
+# 处理地图点击事件（仅在未飞行时生效）
+if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
+    lat_click = map_output["last_clicked"]["lat"]   # WGS-84 纬度
+    lng_click = map_output["last_clicked"]["lng"]   # WGS-84 经度
+    # ★ 关键修复：将 WGS-84 坐标转换为高德地图使用的 GCJ-02 坐标
+    gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
+    clicked_gcj = [gcj_lng, gcj_lat]                # 现在坐标与高德底图对齐
+    # 根据当前模式更新起点或终点
+    if st.session_state.point_select_mode == 'A':
+        st.session_state.points_gcj['A'] = clicked_gcj
+        st.success(f"起点 A 已更新为: ({gcj_lng:.6f}, {gcj_lat:.6f})")
+    else:
+        st.session_state.points_gcj['B'] = clicked_gcj
+        st.success(f"终点 B 已更新为: ({gcj_lng:.6f}, {gcj_lat:.6f})")
+    # 重新规划路径
+    st.session_state.plan_path = create_avoidance_path(
+        st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+        st.session_state.obstacles, st.session_state.flight_alt,
+        st.session_state.avoid_direction, st.session_state.safety_radius
+    )
+    st.rerun()
                 st.session_state.plan_path = create_avoidance_path(
                     st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                     st.session_state.obstacles, st.session_state.flight_alt,
