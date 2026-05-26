@@ -19,20 +19,25 @@ BASE_SPEED = 5.0
 CONFIG_FILE = "obstacle_config.json"
 
 # --------------------------------------------- 坐标转换函数 -----------------------------------------
-def wgs84_to_gcj02(lng, lat):
-    return lng + 0.006, lat + 0.002
-
-def gcj02_to_wgs84(lng, lat):
-    return lng - 0.006, lat - 0.002
+# 导入专业坐标转换库
+from coord_convert.transform import wgs2gcj, gcj2wgs
 
 def transform_to_gcj02(lng, lat, from_coord):
+    """将输入的坐标转换为GCJ-02坐标系"""
     if from_coord == "WGS-84":
-        return wgs84_to_gcj02(lng, lat)
+        # 使用专业的 wgs2gcj 函数进行转换
+        gcj_lng, gcj_lat = wgs2gcj(lng, lat)
+        return gcj_lng, gcj_lat
+    # 如果已经是GCJ-02，则直接返回原值
     return lng, lat
 
 def transform_to_display(lng, lat, to_coord):
+    """将内部的GCJ-02坐标转换为用户界面所需的坐标系显示"""
     if to_coord == "WGS-84":
-        return gcj02_to_wgs84(lng, lat)
+        # 使用专业的 gcj2wgs 函数进行转换
+        wgs_lng, wgs_lat = gcj2wgs(lng, lat)
+        return wgs_lng, wgs_lat
+    # 如果用户选择显示GCJ-02，则直接返回原值
     return lng, lat
 
 # --------------------------------------------- 障碍物管理 --------------------------------------------
