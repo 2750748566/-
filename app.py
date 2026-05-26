@@ -421,7 +421,7 @@ def main():
 
 # ------------------------------- 航线规划页面 ----------------------------------------
 elif st.session_state.page == "航线规划":
-    st.header("🗺️ 航线规划 - 点击地图直接移动起点/终点")
+    st.header("🗺️ 航线规划 - 点击地图 + 方向微调")
     col_map, col_panel = st.columns([3, 1.2])
 
     with col_panel:
@@ -430,7 +430,6 @@ elif st.session_state.page == "航线规划":
         # ----- 1. 选择要移动的点 -----
         if st.session_state.flight_started:
             st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
-            # 飞行中禁用单选按钮
             select_mode = st.radio(
                 "当前可移动的点", ["起点 (A)", "终点 (B)"],
                 key="mode_disabled", disabled=True, horizontal=True
@@ -445,7 +444,7 @@ elif st.session_state.page == "航线规划":
         
         st.markdown("---")
         
-        # ----- 2. 显示当前坐标（只读，但方便查看）-----
+        # ----- 2. 显示当前坐标（GCJ-02）-----
         st.markdown("#### 📍 当前坐标 (GCJ-02)")
         a_lng, a_lat = st.session_state.points_gcj['A']
         b_lng, b_lat = st.session_state.points_gcj['B']
@@ -453,9 +452,78 @@ elif st.session_state.page == "航线规划":
         st.text(f"终点 B : {b_lng:.6f}, {b_lat:.6f}")
         
         st.markdown("---")
-        st.info("💡 **操作提示**：先在上方选择要移动的点（A 或 B），然后在地图上任意位置 **单击**，该点就会立即移动并自动规划航线。")
         
-        # ----- 3. 飞行参数与避障策略（原样保留）-----
+        # ----- 2.5 精确微调面板（新增）-----
+        st.markdown("#### 🎯 精确微调（每步约 1 米）")
+        col_dir1, col_dir2, col_dir3, col_dir4 = st.columns(4)
+        step = 0.00001   # 经度/纬度 1 步约 1 米
+        
+        # 获取当前选中的点坐标（直接引用列表，方便修改）
+        if st.session_state.point_select_mode == 'A':
+            target = st.session_state.points_gcj['A']
+        else:
+            target = st.session_state.points_gcj['B']
+        
+        # 北移（纬度增加）
+        if col_dir1.button("⬆️ 北", key="move_n"):
+            target[1] += step
+            if st.session_state.point_select_mode == 'A':
+                st.session_state.points_gcj['A'] = target
+            else:
+                st.session_state.points_gcj['B'] = target
+            st.session_state.plan_path = create_avoidance_path(
+                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                st.session_state.obstacles, st.session_state.flight_alt,
+                st.session_state.avoid_direction, st.session_state.safety_radius
+            )
+            st.rerun()
+        
+        # 南移（纬度减小）
+        if col_dir2.button("⬇️ 南", key="move_s"):
+            target[1] -= step
+            if st.session_state.point_select_mode == 'A':
+                st.session_state.points_gcj['A'] = target
+            else:
+                st.session_state.points_gcj['B'] = target
+            st.session_state.plan_path = create_avoidance_path(
+                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                st.session_state.obstacles, st.session_state.flight_alt,
+                st.session_state.avoid_direction, st.session_state.safety_radius
+            )
+            st.rerun()
+        
+        # 西移（经度减小）
+        if col_dir3.button("⬅️ 西", key="move_w"):
+            target[0] -= step
+            if st.session_state.point_select_mode == 'A':
+                st.session_state.points_gcj['A'] = target
+            else:
+                st.session_state.points_gcj['B'] = target
+            st.session_state.plan_path = create_avoidance_path(
+                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                st.session_state.obstacles, st.session_state.flight_alt,
+                st.session_state.avoid_direction, st.session_state.safety_radius
+            )
+            st.rerun()
+        
+        # 东移（经度增加）
+        if col_dir4.button("➡️ 东", key="move_e"):
+            target[0] += step
+            if st.session_state.point_select_mode == 'A':
+                st.session_state.points_gcj['A'] = target
+            else:
+                st.session_state.points_gcj['B'] = target
+            st.session_state.plan_path = create_avoidance_path(
+                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                st.session_state.obstacles, st.session_state.flight_alt,
+                st.session_state.avoid_direction, st.session_state.safety_radius
+            )
+            st.rerun()
+        
+        st.markdown("---")
+        st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置\n- 点击方向按钮 → 每次移动约 1 米（精确调整）")
+        
+        # ----- 3. 飞行参数与避障策略（保持不变）-----
         st.subheader("✈️ 飞行参数")
         new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
         if new_alt != st.session_state.flight_alt:
@@ -522,9 +590,8 @@ elif st.session_state.page == "航线规划":
             else:
                 st.success("直线航线，无绕行")
 
-    # ---------- 右侧可交互地图（直接点击移动）----------
+    # ---------- 右侧可交互地图（原有逻辑，点击直接移动）----------
     with col_map:
-        # 自动生成路径（若尚未生成）
         if st.session_state.plan_path is None and st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
             st.session_state.plan_path = create_avoidance_path(
                 st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
@@ -542,18 +609,15 @@ elif st.session_state.page == "航线规划":
             st.session_state.flight_alt
         )
 
-        # 显示地图并获取点击坐标
         map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
 
-        # 处理点击事件：直接移动选中的点，无需确认
+        # 处理地图点击：直接移动选中的点
         if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
             lat_click = map_output["last_clicked"]["lat"]
             lng_click = map_output["last_clicked"]["lng"]
-            # 将点击的 WGS84 坐标转换为 GCJ-02（使用高精度函数，请确保已安装 coord-convert）
-            # 这里假设你的 wgs84_to_gcj02 已经替换为精确转换函数
+            # 使用精确转换（请确保 wgs84_to_gcj02 已替换为专业库）
             gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
             
-            # 根据当前选择移动起点或终点
             if st.session_state.point_select_mode == 'A':
                 st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
                 st.success(f"起点 A 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
@@ -561,91 +625,12 @@ elif st.session_state.page == "航线规划":
                 st.session_state.points_gcj['B'] = [gcj_lng, gcj_lat]
                 st.success(f"终点 B 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
             
-            # 重新规划航线
             st.session_state.plan_path = create_avoidance_path(
                 st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
                 st.session_state.obstacles, st.session_state.flight_alt,
                 st.session_state.avoid_direction, st.session_state.safety_radius
             )
             st.rerun()
-    # ---------- 右侧可交互地图（直接点击移动）----------
-    with col_map:
-        # 自动生成路径（若尚未生成）
-        if st.session_state.plan_path is None and st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
-            st.session_state.plan_path = create_avoidance_path(
-                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                st.session_state.obstacles, st.session_state.flight_alt,
-                st.session_state.avoid_direction, st.session_state.safety_radius)
-
-        drone_pos_gcj = None
-        if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.latest_hb:
-            drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
-
-        folium_map = create_planning_map(
-            SCHOOL_CENTER_GCJ, st.session_state.points_gcj,
-            st.session_state.obstacles, st.session_state.flight_trail,
-            st.session_state.plan_path, drone_pos_gcj,
-            st.session_state.flight_alt
-        )
-
-        # 显示地图并获取点击坐标
-        map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
-
-        # 处理点击事件：直接移动选中的点，无需确认
-        if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
-            lat_click = map_output["last_clicked"]["lat"]
-            lng_click = map_output["last_clicked"]["lng"]
-            # 将点击的 WGS84 坐标转换为 GCJ-02（使用高精度函数，请确保已安装 coord-convert）
-            # 这里假设你的 wgs84_to_gcj02 已经替换为精确转换函数
-            gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
-            
-            # 根据当前选择移动起点或终点
-            if st.session_state.point_select_mode == 'A':
-                st.session_state.points_gcj['A'] = [gcj_lng, gcj_lat]
-                st.success(f"起点 A 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
-            else:
-                st.session_state.points_gcj['B'] = [gcj_lng, gcj_lat]
-                st.success(f"终点 B 已移动到: ({gcj_lng:.6f}, {gcj_lat:.6f})")
-            
-            # 重新规划航线
-            st.session_state.plan_path = create_avoidance_path(
-                st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                st.session_state.obstacles, st.session_state.flight_alt,
-                st.session_state.avoid_direction, st.session_state.safety_radius
-            )
-            st.rerun()
-
-        # ---------- 右侧可交互地图 ----------
-        with col_map:
-            if st.session_state.plan_path is None and st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
-                st.session_state.plan_path = create_avoidance_path(
-                    st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
-                    st.session_state.obstacles, st.session_state.flight_alt,
-                    st.session_state.avoid_direction, st.session_state.safety_radius)
-
-            drone_pos_gcj = None
-            if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.latest_hb:
-                drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
-
-            folium_map = create_planning_map(
-                SCHOOL_CENTER_GCJ, st.session_state.points_gcj,
-                st.session_state.obstacles, st.session_state.flight_trail,
-                st.session_state.plan_path, drone_pos_gcj,
-                st.session_state.flight_alt
-            )
-
-            # 不再添加 DivIcon 提示，避免 JSON 序列化错误
-            map_output = st_folium(folium_map, width=700, height=550, key="planning_map")
-
-            if (not st.session_state.flight_started) and map_output and map_output.get("last_clicked"):
-                lat_click = map_output["last_clicked"]["lat"]
-                lng_click = map_output["last_clicked"]["lng"]
-                gcj_lng, gcj_lat = wgs84_to_gcj02(lng_click, lat_click)
-                clicked_gcj = [gcj_lng, gcj_lat]
-                st.session_state.pending_click_point = clicked_gcj
-                st.info(f"已暂存{'起点' if st.session_state.point_select_mode == 'A' else '终点'}：({gcj_lng:.6f}, {gcj_lat:.6f})，请点击「确定并规划航线」")
-                st.rerun()
-
     # ------------------------------- 飞行监控页面 ----------------------------------------
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
