@@ -419,7 +419,6 @@ def main():
             st.info(f"📁 文件状态: 共 {len(data.get('obstacles', []))} 个障碍物 | 保存时间: {save_time} | 版本: {data.get('version', '未知')}")
             st.text(f"路径: {os.path.abspath(CONFIG_FILE)}")
 
-# ------------------------------- 航线规划页面 ----------------------------------------
 elif st.session_state.page == "航线规划":
     st.header("🗺️ 航线规划 - 点击地图 + 方向微调")
     col_map, col_panel = st.columns([3, 1.2])
