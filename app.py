@@ -259,7 +259,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
         if coords and len(coords) >= 3:
             color = "red" if height > flight_alt else "orange"
             folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.4,
-                           popup=f"🚧 {obs.get('name', '障碍物')}\\n高度:{height}m").add_to(m)
+                           popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)  # 修改：\\n -> \n
     # 起点/终点
     if points_gcj.get('A'):
         folium.Marker([points_gcj['A'][1], points_gcj['A'][0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
@@ -271,9 +271,9 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
     # 历史轨迹（橙色）
     if flight_trail:
         folium.PolyLine([[lat,lng] for lng,lat in flight_trail[-100:]], color='orange', weight=2).add_to(m)
-    # 当前位置
+    # 当前位置 - 移除了自定义图标和前缀，避免序列化错误
     if drone_pos_gcj:
-        folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
+        folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue')).add_to(m)
     return m
 
 # --------------------------------------------- 初始化状态 -------------------------------------------
@@ -685,14 +685,15 @@ def main():
                 if coords and len(coords) >= 3:
                     color = "red" if height > st.session_state.flight_alt else "orange"
                     folium.Polygon([[c[1], c[0]] for c in coords], color=color, weight=2, fill=True, fill_color=color, fill_opacity=0.4,
-                                   popup=f"🚧 {obs.get('name', '障碍物')}\\n高度:{height}m").add_to(m)
+                                   popup=f"🚧 {obs.get('name', '障碍物')}\n高度:{height}m").add_to(m)  # 修改：\\n -> \n
             folium.Marker([a[1], a[0]], popup='起点A', icon=folium.Icon(color='green')).add_to(m)
             folium.Marker([b[1], b[0]], popup='终点B', icon=folium.Icon(color='red')).add_to(m)
             if st.session_state.plan_path:
                 folium.PolyLine([[p[1],p[0]] for p in st.session_state.plan_path], color='green', weight=4).add_to(m)
             if st.session_state.flight_trail:
                 folium.PolyLine([[lat,lng] for lng,lat in st.session_state.flight_trail[-100:]], color='orange', weight=2).add_to(m)
-            folium.Marker([center[1], center[0]], icon=folium.Icon(color='blue', icon='plane', prefix='fa')).add_to(m)
+            # 修改：移除自定义图标前缀
+            folium.Marker([center[1], center[0]], icon=folium.Icon(color='blue')).add_to(m)
             folium_static(m, width=700, height=500)
 
         st.markdown("---")
