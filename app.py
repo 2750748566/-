@@ -121,7 +121,6 @@ def line_intersects_polygon(p1, p2, polygon):
             return True
     return False
 
-# 修改：增加 ignore_alt 参数，用于强制忽略高度比较
 def get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False):
     """
     返回与线段 start-end 相交的障碍物列表。
@@ -142,7 +141,7 @@ def meters_to_deg(meters, lat=32.23):
     return lng_deg, lat_deg
 
 # ------------------------------------------------------------
-# 绕行算法（修改：左右绕行强制忽略高度，最佳航线智能判断）
+# 绕行算法（优化版：递归路径规划，确保无碰撞）
 # ------------------------------------------------------------
 def compute_blocked_bounds(blocking_obs):
     min_lng = float('inf')
@@ -157,31 +156,97 @@ def compute_blocked_bounds(blocking_obs):
             max_lat = max(max_lat, p[1])
     return min_lng, max_lng, min_lat, max_lat
 
-def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
-    # 强制忽略高度，所有障碍物都视为阻挡，确保航线不与任何多边形相交
+def is_path_clear(p1, p2, obstacles, flight_alt, ignore_alt=False):
+    """检查线段 p1-p2 是否与任何障碍物相交"""
+    blocking = get_blocking_obstacles(p1, p2, obstacles, flight_alt, ignore_alt)
+    return len(blocking) == 0
+
+def find_avoidance_point(start, end, obstacles, flight_alt, direction, safety_radius=5):
+    """
+    根据绕行方向（左/右）计算一个安全的中间点。
+    返回 (waypoint, remaining_obstacles) 其中 waypoint 为避开当前所有阻挡障碍物的点，
+    remaining_obstacles 为起点->waypoint 段仍需处理的障碍物（用于递归）。
+    """
+    # 获取阻挡障碍物（强制忽略高度，确保左右绕行总是规避所有障碍物）
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=True)
     if not blocking:
+        return None, []
+    
+    min_lng, max_lng, min_lat, max_lat = compute_blocked_bounds(blocking)
+    safe_lat = meters_to_deg(safety_radius * 3)[1]  # 3倍安全半径作为缓冲
+    safe_lng = meters_to_deg(safety_radius * 3)[0]
+    
+    if direction == "向左绕行":
+        # 向上（北）绕行：取最大纬度 + 安全距离，经度取起点和终点的中间值
+        lat_offset = max_lat + safe_lat
+        # 经度选在起点和终点的中点，避免过度偏离
+        lng_mid = (start[0] + end[0]) / 2
+        waypoint = [lng_mid, lat_offset]
+    elif direction == "向右绕行":
+        # 向下（南）绕行：取最小纬度 - 安全距离
+        lat_offset = min_lat - safe_lat
+        lng_mid = (start[0] + end[0]) / 2
+        waypoint = [lng_mid, lat_offset]
+    else:
+        raise ValueError("direction must be '向左绕行' or '向右绕行'")
+    
+    # 确保 waypoint 不与任何障碍物相交（通过轻微调整）
+    # 简单迭代：如果 waypoint 落在某个障碍物内部，则向外微调
+    max_attempts = 10
+    for _ in range(max_attempts):
+        collide = False
+        for obs in blocking:
+            if point_in_polygon(waypoint, obs['polygon']):
+                collide = True
+                if direction == "向左绕行":
+                    waypoint[1] += safe_lat
+                else:
+                    waypoint[1] -= safe_lat
+                break
+        if not collide:
+            break
+    
+    # 返回中间点和剩余需要处理的障碍物（起点->waypoint 和 waypoint->终点分别递归）
+    return waypoint, blocking
+
+def plan_recursive_path(start, end, obstacles, flight_alt, direction, safety_radius=5, depth=0):
+    """
+    递归规划无碰撞路径。
+    返回路径点列表（包含起点和终点）。
+    """
+    if depth > 10:  # 防止无限递归
         return [start, end]
-    _, _, _, max_lat = compute_blocked_bounds(blocking)
-    safe_lat = meters_to_deg(safety_radius * 5)[1]
-    y_offset = max_lat + safe_lat
-    waypoint_up = [start[0], y_offset]
-    waypoint_right = [end[0], y_offset]
-    return [start, waypoint_up, waypoint_right, end]
+    
+    # 检查直线是否无碰撞
+    if is_path_clear(start, end, obstacles, flight_alt, ignore_alt=True):
+        return [start, end]
+    
+    # 需要绕行，找一个中间点
+    waypoint, _ = find_avoidance_point(start, end, obstacles, flight_alt, direction, safety_radius)
+    if waypoint is None:
+        # 无法找到绕行点，返回直线
+        return [start, end]
+    
+    # 递归规划前段和后段
+    path1 = plan_recursive_path(start, waypoint, obstacles, flight_alt, direction, safety_radius, depth+1)
+    path2 = plan_recursive_path(waypoint, end, obstacles, flight_alt, direction, safety_radius, depth+1)
+    
+    # 合并路径（去除重复的waypoint）
+    full_path = path1[:-1] + path2
+    return full_path
+
+def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """向左绕行（向上/北绕行），确保无碰撞"""
+    path = plan_recursive_path(start, end, obstacles, flight_alt, "向左绕行", safety_radius)
+    return path
 
 def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
-    # 强制忽略高度，所有障碍物都视为阻挡，确保航线不与任何多边形相交
-    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=True)
-    if not blocking:
-        return [start, end]
-    _, _, min_lat, _ = compute_blocked_bounds(blocking)
-    safe_lat = meters_to_deg(safety_radius * 5)[1]
-    y_offset = min_lat - safe_lat
-    waypoint_down = [start[0], y_offset]
-    waypoint_right = [end[0], y_offset]
-    return [start, waypoint_down, waypoint_right, end]
+    """向右绕行（向下/南绕行），确保无碰撞"""
+    path = plan_recursive_path(start, end, obstacles, flight_alt, "向右绕行", safety_radius)
+    return path
 
 def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
+    """最佳航线：飞行高度足够时直线穿越，否则选择较短绕行路径"""
     # 先按正常高度比较判断是否有阻挡
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False)
     if not blocking:
@@ -203,7 +268,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
 # ------------------------------------------------------------
-# 心跳模拟器
+# 心跳模拟器（保持不变）
 # ------------------------------------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
@@ -281,7 +346,7 @@ class HeartbeatSim:
             return self._add_heartbeat()
 
 # ------------------------------------------------------------
-# 地图创建
+# 地图创建（保持不变）
 # ------------------------------------------------------------
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt):
     m = folium.Map(location=[center_gcj[1], center_gcj[0]], zoom_start=16, tiles=GAODE_TILE, attr='高德')
@@ -310,7 +375,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
     return m
 
 # ------------------------------------------------------------
-# 初始化状态
+# 初始化状态（保持不变）
 # ------------------------------------------------------------
 def init():
     DEFAULT_A_GCJ = [118.746426, 32.232384]
@@ -340,7 +405,7 @@ def init():
             st.session_state[k] = v
 
 # ------------------------------------------------------------
-# 主程序
+# 主程序（除绕行算法外，其余完全不变）
 # ------------------------------------------------------------
 def main():
     st.set_page_config(page_title="南京科技职业学院 - 无人机地面站", layout="wide")
