@@ -103,8 +103,6 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
-    """线段与多边形相交（包含边界接触视为相交）"""
-    # 检查端点是否在多边形内部或边界上
     if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
@@ -115,19 +113,21 @@ def line_intersects_polygon(p1, p2, polygon):
             return True
     return False
 
-# ---------- 避障核心函数（强化版）----------
 def get_blocking_obstacles(start, end, obstacles, flight_alt):
-    """判断线段是否被障碍物阻挡（精确判断）"""
     blocking = []
     for obs in obstacles:
         if obs.get('height', 30) > flight_alt:
             coords = obs.get('polygon', [])
-            if coords and len(coords) >= 3:
-                # 检查线段是否与多边形相交（包含端点在内）
-                if line_intersects_polygon(start, end, coords):
-                    blocking.append(obs)
+            if coords and line_intersects_polygon(start, end, coords):
+                blocking.append(obs)
     return blocking
 
+def meters_to_deg(meters, lat=32.23):
+    lat_deg = meters / 111000
+    lng_deg = meters / (111000 * math.cos(math.radians(lat)))
+    return lng_deg, lat_deg
+
+# --------------------------------------------- 绕行算法 ---------------------------------------------
 def compute_blocked_bounds(blocking_obs):
     min_lng = float('inf')
     max_lng = -float('inf')
@@ -141,88 +141,42 @@ def compute_blocked_bounds(blocking_obs):
             max_lat = max(max_lat, p[1])
     return min_lng, max_lng, min_lat, max_lat
 
-def meters_to_deg(meters, lat=32.23):
-    lat_deg = meters / 111000
-    lng_deg = meters / (111000 * math.cos(math.radians(lat)))
-    return lng_deg, lat_deg
-
-def create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safety_radius=5, depth=0):
-    """
-    递归生成绕行路径，直到完全避开所有障碍物
-    direction: "向左绕行", "向右绕行", "best"
-    """
-    if depth > 15:  # 防止无限递归
-        st.warning("无法找到完全避障路径，使用直线")
-        return [start, end]
-    
+def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
     if not blocking:
         return [start, end]
-    
-    # 计算所有阻挡障碍物的联合边界
-    min_lng, max_lng, min_lat, max_lat = compute_blocked_bounds(blocking)
-    
-    # 动态计算偏移步长（基于安全半径，但至少保证偏移能越过障碍物边界）
-    base_step = meters_to_deg(safety_radius)[1]  # 安全半径对应纬度步长
-    # 确保偏移大于障碍物半宽（简单处理：取障碍物跨度的一半 + 安全步长）
-    obstacle_span_lat = (max_lat - min_lat) / 2
-    step_lat = max(base_step, obstacle_span_lat + 0.00001)  # 最小0.00001度≈1米
-    
-    if direction == "向左绕行":
-        # 向上（北）偏移
-        offset = max_lat + step_lat
-        waypoint1 = [start[0], offset]
-        waypoint2 = [end[0], offset]
-    elif direction == "向右绕行":
-        # 向下（南）偏移
-        offset = min_lat - step_lat
-        waypoint1 = [start[0], offset]
-        waypoint2 = [end[0], offset]
-    else:  # "best" 或默认：选择总路径更短的绕行方向
-        left_path = create_obstacle_free_path(start, end, obstacles, flight_alt, "向左绕行", safety_radius, depth+1)
-        right_path = create_obstacle_free_path(start, end, obstacles, flight_alt, "向右绕行", safety_radius, depth+1)
-        left_len = sum(distance(left_path[i], left_path[i+1]) for i in range(len(left_path)-1))
-        right_len = sum(distance(right_path[i], right_path[i+1]) for i in range(len(right_path)-1))
-        return left_path if left_len <= right_len else right_path
-    
-    # 构建临时路径（三点：起点 -> 绕行点1 -> 绕行点2 -> 终点）
-    temp_path = [start, waypoint1, waypoint2, end]
-    
-    # 分段检查该路径是否仍有阻挡
-    still_blocked = False
-    for i in range(len(temp_path)-1):
-        seg_start = temp_path[i]
-        seg_end = temp_path[i+1]
-        if get_blocking_obstacles(seg_start, seg_end, obstacles, flight_alt):
-            still_blocked = True
-            break
-    
-    if still_blocked:
-        # 仍有阻挡，递归增加安全半径（加大偏移）
-        return create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safety_radius + 2, depth+1)
-    
-    return temp_path
+    _, _, _, max_lat = compute_blocked_bounds(blocking)
+    safe_lat = meters_to_deg(safety_radius * 5)[1]
+    y_offset = max_lat + safe_lat
+    waypoint_up = [start[0], y_offset]
+    waypoint_right = [end[0], y_offset]
+    return [start, waypoint_up, waypoint_right, end]
+
+def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
+    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
+    if not blocking:
+        return [start, end]
+    _, _, min_lat, _ = compute_blocked_bounds(blocking)
+    safe_lat = meters_to_deg(safety_radius * 5)[1]
+    y_offset = min_lat - safe_lat
+    waypoint_down = [start[0], y_offset]
+    waypoint_right = [end[0], y_offset]
+    return [start, waypoint_down, waypoint_right, end]
+
+def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
+    left_path = find_left_path(start, end, obstacles, flight_alt, safety_radius)
+    right_path = find_right_path(start, end, obstacles, flight_alt, safety_radius)
+    left_len = sum(distance(left_path[i], left_path[i+1]) for i in range(len(left_path)-1))
+    right_len = sum(distance(right_path[i], right_path[i+1]) for i in range(len(right_path)-1))
+    return left_path if left_len <= right_len else right_path
 
 def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_radius=5):
-    """
-    对外接口：生成避障路径
-    direction: "最佳航线" / "向左绕行" / "向右绕行"
-    """
-    # 映射中文参数
     if direction == "向左绕行":
-        dir_code = "向左绕行"
+        return find_left_path(start, end, obstacles, flight_alt, safety_radius)
     elif direction == "向右绕行":
-        dir_code = "向右绕行"
+        return find_right_path(start, end, obstacles, flight_alt, safety_radius)
     else:
-        dir_code = "best"
-    
-    path = create_obstacle_free_path(start, end, obstacles, flight_alt, dir_code, safety_radius)
-    # 去除重复的相邻点
-    cleaned = [path[0]]
-    for p in path[1:]:
-        if distance(cleaned[-1], p) > 1e-9:
-            cleaned.append(p)
-    return cleaned
+        return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
 # --------------------------------------------- 心跳模拟器 --------------------------------------------
 class HeartbeatData:
@@ -322,7 +276,7 @@ def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_pa
     # 历史轨迹
     if flight_trail:
         folium.PolyLine([[lat,lng] for lng,lat in flight_trail[-100:]], color='orange', weight=2).add_to(m)
-    # 无人机当前位置（已简化图标）
+    # 无人机当前位置（已简化图标，避免序列化错误）
     if drone_pos_gcj:
         folium.Marker([drone_pos_gcj[1], drone_pos_gcj[0]], icon=folium.Icon(color='blue')).add_to(m)
     return m
