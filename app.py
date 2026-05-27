@@ -121,9 +121,7 @@ def line_intersects_polygon(p1, p2, polygon):
             return True
     return False
 
-# ------------------------------------------------------------
-# 障碍物阻挡检测（修改：增加 ignore_alt 参数，用于强制忽略高度比较）
-# ------------------------------------------------------------
+# 修改：增加 ignore_alt 参数，用于强制忽略高度比较
 def get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False):
     """
     返回与线段 start-end 相交的障碍物列表。
@@ -132,7 +130,6 @@ def get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False):
     """
     blocking = []
     for obs in obstacles:
-        # 如果忽略高度，或者障碍物高度高于飞行高度，则进行几何相交检测
         if ignore_alt or obs.get('height', 30) > flight_alt:
             coords = obs.get('polygon', [])
             if coords and line_intersects_polygon(start, end, coords):
@@ -145,7 +142,7 @@ def meters_to_deg(meters, lat=32.23):
     return lng_deg, lat_deg
 
 # ------------------------------------------------------------
-# 绕行算法（修改：调用 get_blocking_obstacles 时传入 ignore_alt=True）
+# 绕行算法（修改：左右绕行强制忽略高度，最佳航线智能判断）
 # ------------------------------------------------------------
 def compute_blocked_bounds(blocking_obs):
     min_lng = float('inf')
@@ -161,7 +158,7 @@ def compute_blocked_bounds(blocking_obs):
     return min_lng, max_lng, min_lat, max_lat
 
 def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
-    # 修改：忽略高度，强制所有障碍物参与绕行判断
+    # 强制忽略高度，所有障碍物都视为阻挡，确保航线不与任何多边形相交
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=True)
     if not blocking:
         return [start, end]
@@ -173,7 +170,7 @@ def find_left_path(start, end, obstacles, flight_alt, safety_radius=5):
     return [start, waypoint_up, waypoint_right, end]
 
 def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
-    # 修改：忽略高度，强制所有障碍物参与绕行判断
+    # 强制忽略高度，所有障碍物都视为阻挡，确保航线不与任何多边形相交
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=True)
     if not blocking:
         return [start, end]
@@ -185,6 +182,12 @@ def find_right_path(start, end, obstacles, flight_alt, safety_radius=5):
     return [start, waypoint_down, waypoint_right, end]
 
 def find_best_path(start, end, obstacles, flight_alt, safety_radius=5):
+    # 先按正常高度比较判断是否有阻挡
+    blocking = get_blocking_obstacles(start, end, obstacles, flight_alt, ignore_alt=False)
+    if not blocking:
+        # 飞行高度足够，直线穿越
+        return [start, end]
+    # 有阻挡，计算左右绕行路径（内部使用强制忽略高度以确保绕行安全）
     left_path = find_left_path(start, end, obstacles, flight_alt, safety_radius)
     right_path = find_right_path(start, end, obstacles, flight_alt, safety_radius)
     left_len = sum(distance(left_path[i], left_path[i+1]) for i in range(len(left_path)-1))
@@ -196,7 +199,7 @@ def create_avoidance_path(start, end, obstacles, flight_alt, direction, safety_r
         return find_left_path(start, end, obstacles, flight_alt, safety_radius)
     elif direction == "向右绕行":
         return find_right_path(start, end, obstacles, flight_alt, safety_radius)
-    else:
+    else:  # 最佳航线
         return find_best_path(start, end, obstacles, flight_alt, safety_radius)
 
 # ------------------------------------------------------------
