@@ -405,7 +405,7 @@ def init():
             st.session_state[k] = v
 
 # ------------------------------------------------------------
-# 主程序（除绕行算法外，其余完全不变）
+# 主程序
 # ------------------------------------------------------------
 def main():
     st.set_page_config(page_title="南京科技职业学院 - 无人机地面站", layout="wide")
@@ -520,10 +520,47 @@ def main():
 
     # ==================== 航线规划页面 ====================
     elif st.session_state.page == "航线规划":
-        st.header("🗺️ 航线规划 - 点击地图 + 方向微调")
+        st.header("🗺️ 航线规划 - 点击地图 + 方向微调 + 手动输入坐标")
         col_map, col_panel = st.columns([3, 1.2])
         with col_panel:
             st.markdown("### 🎮 控制面板")
+            
+            # ---------- 新增：手动输入起点/终点坐标 ----------
+            with st.expander("✏️ 手动输入起点/终点坐标", expanded=False):
+                st.markdown("**注意：坐标将根据左侧「坐标系设置」自动转换为GCJ-02存储**")
+                col_a_in, col_b_in = st.columns(2)
+                with col_a_in:
+                    st.markdown("#### 起点 A")
+                    a_lng_input = st.number_input("经度 (A)", value=st.session_state.points_gcj['A'][0], format="%.6f", key="manual_a_lng")
+                    a_lat_input = st.number_input("纬度 (A)", value=st.session_state.points_gcj['A'][1], format="%.6f", key="manual_a_lat")
+                with col_b_in:
+                    st.markdown("#### 终点 B")
+                    b_lng_input = st.number_input("经度 (B)", value=st.session_state.points_gcj['B'][0], format="%.6f", key="manual_b_lng")
+                    b_lat_input = st.number_input("纬度 (B)", value=st.session_state.points_gcj['B'][1], format="%.6f", key="manual_b_lat")
+                
+                if st.button("📌 应用手动输入坐标", key="apply_manual_coords"):
+                    # 获取当前坐标系设置
+                    current_sys = st.session_state.coord_sys
+                    # 将用户输入的坐标（按当前坐标系）转换为GCJ-02内部存储
+                    if current_sys == "WGS-84":
+                        a_gcj = wgs84_to_gcj02(a_lng_input, a_lat_input)
+                        b_gcj = wgs84_to_gcj02(b_lng_input, b_lat_input)
+                    else:  # GCJ-02
+                        a_gcj = [a_lng_input, a_lat_input]
+                        b_gcj = [b_lng_input, b_lat_input]
+                    st.session_state.points_gcj['A'] = a_gcj
+                    st.session_state.points_gcj['B'] = b_gcj
+                    # 重新规划路径
+                    st.session_state.plan_path = create_avoidance_path(
+                        st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+                        st.session_state.obstacles, st.session_state.flight_alt,
+                        st.session_state.avoid_direction, st.session_state.safety_radius
+                    )
+                    st.success("坐标已更新，地图和航线已刷新")
+                    st.rerun()
+            st.markdown("---")
+            # ------------------------------------------------
+            
             if st.session_state.flight_started:
                 st.warning("飞行任务进行中，无法修改航点。请先停止飞行。")
                 select_mode = st.radio("当前可移动的点", ["起点 (A)", "终点 (B)"], key="mode_disabled", disabled=True, horizontal=True)
@@ -599,7 +636,7 @@ def main():
                 )
                 st.rerun()
             st.markdown("---")
-            st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置\n- 点击方向按钮 → 每次移动约 1 米（精确调整）")
+            st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置\n- 点击方向按钮 → 每次移动约 1 米（精确调整）\n- 也可以手动输入坐标快速定位")
 
             st.subheader("✈️ 飞行参数")
             new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
