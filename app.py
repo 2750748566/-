@@ -103,6 +103,8 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(p1, p2, polygon):
+    """线段与多边形相交（包含边界接触视为相交）"""
+    # 检查端点是否在多边形内部或边界上
     if point_in_polygon(p1, polygon) or point_in_polygon(p2, polygon):
         return True
     n = len(polygon)
@@ -113,20 +115,16 @@ def line_intersects_polygon(p1, p2, polygon):
             return True
     return False
 
-# ---------- 避障核心函数（递归绕行）----------
-def get_blocking_obstacles(start, end, obstacles, flight_alt, tolerance=1e-9):
-    """判断线段是否被障碍物阻挡，增加微小容差避免浮点误差"""
+# ---------- 避障核心函数（强化版）----------
+def get_blocking_obstacles(start, end, obstacles, flight_alt):
+    """判断线段是否被障碍物阻挡（精确判断）"""
     blocking = []
     for obs in obstacles:
         if obs.get('height', 30) > flight_alt:
             coords = obs.get('polygon', [])
             if coords and len(coords) >= 3:
-                # 收缩线段两端，避免刚好擦边时误判
-                dx = (end[0] - start[0]) * tolerance
-                dy = (end[1] - start[1]) * tolerance
-                p1 = [start[0] + dx, start[1] + dy]
-                p2 = [end[0] - dx, end[1] - dy]
-                if line_intersects_polygon(p1, p2, coords):
+                # 检查线段是否与多边形相交（包含端点在内）
+                if line_intersects_polygon(start, end, coords):
                     blocking.append(obs)
     return blocking
 
@@ -153,7 +151,8 @@ def create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safe
     递归生成绕行路径，直到完全避开所有障碍物
     direction: "向左绕行", "向右绕行", "best"
     """
-    if depth > 10:  # 防止无限递归
+    if depth > 15:  # 防止无限递归
+        st.warning("无法找到完全避障路径，使用直线")
         return [start, end]
     
     blocking = get_blocking_obstacles(start, end, obstacles, flight_alt)
@@ -163,9 +162,11 @@ def create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safe
     # 计算所有阻挡障碍物的联合边界
     min_lng, max_lng, min_lat, max_lat = compute_blocked_bounds(blocking)
     
-    # 动态计算偏移步长（基于安全半径）
-    step_lat = meters_to_deg(safety_radius * 2)[1]  # 约 1~2 米
-    step_lng = meters_to_deg(safety_radius * 2)[0]
+    # 动态计算偏移步长（基于安全半径，但至少保证偏移能越过障碍物边界）
+    base_step = meters_to_deg(safety_radius)[1]  # 安全半径对应纬度步长
+    # 确保偏移大于障碍物半宽（简单处理：取障碍物跨度的一半 + 安全步长）
+    obstacle_span_lat = (max_lat - min_lat) / 2
+    step_lat = max(base_step, obstacle_span_lat + 0.00001)  # 最小0.00001度≈1米
     
     if direction == "向左绕行":
         # 向上（北）偏移
@@ -188,12 +189,17 @@ def create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safe
     temp_path = [start, waypoint1, waypoint2, end]
     
     # 分段检查该路径是否仍有阻挡
+    still_blocked = False
     for i in range(len(temp_path)-1):
         seg_start = temp_path[i]
         seg_end = temp_path[i+1]
         if get_blocking_obstacles(seg_start, seg_end, obstacles, flight_alt):
-            # 仍有阻挡，递归增加安全半径（加大偏移）
-            return create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safety_radius + 2, depth+1)
+            still_blocked = True
+            break
+    
+    if still_blocked:
+        # 仍有阻挡，递归增加安全半径（加大偏移）
+        return create_obstacle_free_path(start, end, obstacles, flight_alt, direction, safety_radius + 2, depth+1)
     
     return temp_path
 
