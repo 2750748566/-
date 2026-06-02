@@ -17,8 +17,9 @@ from coord_convert.transform import wgs2gcj, gcj2wgs
 # ------------------------------------------------------------
 SCHOOL_CENTER_GCJ = [118.749413, 32.234097]
 GAODE_TILE = "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
-HEARTBEAT_INTERVAL = 0.2
-BASE_SPEED = 5.0
+HEARTBEAT_INTERVAL = 0.2          # 模拟步长（秒）
+BASE_SPEED = 5.0                  # 米/秒（速度基数）
+HOVER_SECONDS = 5                 # 每个航点停留时间（秒）
 CONFIG_FILE = "obstacle_config.json"
 
 # ------------------------------------------------------------
@@ -239,7 +240,7 @@ def generate_equidistant_waypoints(path, num_segments=6):
     return waypoints
 
 # ------------------------------------------------------------
-# 心跳模拟器 (重构：基于等分航点飞行)
+# 心跳模拟器 (支持航点停留)
 # ------------------------------------------------------------
 class HeartbeatData:
     def __init__(self, flight_time, seq, lat, lng, altitude):
@@ -248,11 +249,12 @@ class HeartbeatData:
         self.lat = lat
         self.lng = lng
         self.altitude = altitude
+
 class HeartbeatSim:
     def __init__(self, start_point):
         self.current_pos = start_point[:]   # [lng, lat]
-        self.waypoints = []
-        self.current_wp_idx = 0
+        self.waypoints = []                 # 等分航点列表（含起点终点）
+        self.current_wp_idx = 0             # 下一个目标航点索引
         self.running = False
         self.start_time = None
         self.last_update = None
@@ -263,6 +265,10 @@ class HeartbeatSim:
         self.arrival_flag = False
         self.arrived_wp_index = -1
         self.finished = False
+        # 停留相关
+        self.hover_remaining = 0.0          # 当前航点剩余停留时间（秒）
+        self.waiting_at_wp = False          # 是否正在停留中
+
     def set_path(self, waypoints, altitude, speed_pct):
         self.waypoints = [wp[:] for wp in waypoints]
         self.current_pos = waypoints[0][:]
@@ -277,7 +283,10 @@ class HeartbeatSim:
         self.total_segments = len(waypoints) - 1
         self.arrival_flag = False
         self.arrived_wp_index = -1
+        self.hover_remaining = 0.0
+        self.waiting_at_wp = False
         self._add_heartbeat(seq=1)
+
     def _add_heartbeat(self, seq=None, arrived=False):
         flight_t = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
         if seq is None:
@@ -285,40 +294,77 @@ class HeartbeatSim:
         hb = HeartbeatData(flight_t, seq, self.current_pos[1], self.current_pos[0], self.altitude)
         self.history.append(hb)
         return hb
+
     def update_one_step(self):
         if not self.running or self.finished:
             return None
+
         now = time.time()
         if self.last_update is None:
             dt = HEARTBEAT_INTERVAL
         else:
             dt = min(HEARTBEAT_INTERVAL, now - self.last_update) if (now - self.last_update) > 0 else HEARTBEAT_INTERVAL
         self.last_update = now
+
+        # 如果正在停留，倒计时
+        if self.waiting_at_wp:
+            self.hover_remaining -= dt
+            if self.hover_remaining <= 0:
+                # 停留结束，继续前往下一航点
+                self.waiting_at_wp = False
+                self.hover_remaining = 0.0
+                # 注意：current_wp_idx 已经是下一个目标航点
+                # 如果已经是最后一个航点（即所有航点都已到达），则结束飞行
+                if self.current_wp_idx >= len(self.waypoints):
+                    self.running = False
+                    self.finished = True
+                    return self._add_heartbeat(arrived=True)
+                # 否则继续移动，本次不移动，下一次 update 将执行移动逻辑
+            else:
+                # 停留中，记录心跳（位置不变）
+                self._add_heartbeat()
+            return self.history[-1] if self.history else None
+
+        # 正常移动逻辑
         if self.current_wp_idx >= len(self.waypoints):
             self.running = False
             self.finished = True
             return self._add_heartbeat(arrived=True)
+
         target = self.waypoints[self.current_wp_idx]
         seg_dist = distance(self.current_pos, target)
         speed = BASE_SPEED * (self.speed_pct / 100.0)
         move_dist = speed * dt
+
         if move_dist >= seg_dist:
+            # 到达航点
             self.current_pos = target[:]
             self._add_heartbeat()
             self.arrival_flag = True
             self.arrived_wp_index = self.current_wp_idx
+
+            # 移动到下一个航点索引
             self.current_wp_idx += 1
+
+            # 判断是否已经到达终点（最后一个航点）
             if self.current_wp_idx >= len(self.waypoints):
                 self.running = False
                 self.finished = True
                 self._add_heartbeat(arrived=True)
+                return self.history[-1]
+            else:
+                # 非终点：进入停留模式
+                self.waiting_at_wp = True
+                self.hover_remaining = HOVER_SECONDS
         else:
+            # 未到达，继续移动
             ratio = move_dist / seg_dist
             delta_lng = (target[0] - self.current_pos[0]) * ratio
             delta_lat = (target[1] - self.current_pos[1]) * ratio
             self.current_pos[0] += delta_lng
             self.current_pos[1] += delta_lat
             self._add_heartbeat()
+
         return self.history[-1] if self.history else None
 
 # ------------------------------------------------------------
@@ -372,8 +418,6 @@ def init():
         'point_select_mode': 'A',
         'pending_click_point': None,
         'last_arrival_msg': "",
-        'loop_flight': False,
-        'user_stopped': False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -638,7 +682,6 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.user_stopped = False
                         st.success("飞行已开始，切换至「飞行监控」查看动态")
                         st.rerun()
                     else:
@@ -648,13 +691,12 @@ def main():
                     st.session_state.flight_started = False
                     if st.session_state.sim:
                         st.session_state.sim.running = False
-                    st.session_state.user_stopped = True
                     st.info("飞行已停止")
                     st.rerun()
             if st.session_state.plan_path:
                 waypoint_count = len(st.session_state.waypoints) - 2 if st.session_state.waypoints else 0
                 if waypoint_count > 0:
-                    st.info(f"航线已均匀分为6段，包含 {waypoint_count+1} 个中间航点（总共{len(st.session_state.waypoints)}个航点）")
+                    st.info(f"航线已均匀分为6段，包含 {waypoint_count+1} 个中间航点（总共{len(st.session_state.waypoints)}个航点），每个航点停留 {HOVER_SECONDS} 秒")
                 else:
                     st.success("直线航线，无绕行")
         with col_map:
@@ -687,23 +729,13 @@ def main():
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
 
-        # 循环飞行开关
-        loop_flight = st.checkbox("🔄 循环飞行（结束后自动重飞）", value=st.session_state.loop_flight,
-                                  help="飞行到达终点后自动重新开始，无需手动操作")
-        if loop_flight != st.session_state.loop_flight:
-            st.session_state.loop_flight = loop_flight
-            st.rerun()
-
-        # 自动刷新逻辑：飞行中 或 (循环飞行开启且飞行已结束) 时刷新页面
-        # 修改刷新间隔为 30 秒，与航点推进频率（约半分钟一个航点）保持一致
-        need_autorefresh = (st.session_state.flight_started and st.session_state.sim and not st.session_state.sim.finished) or \
-                           (st.session_state.loop_flight and st.session_state.sim and st.session_state.sim.finished)
-        if need_autorefresh:
-            st_autorefresh(interval=30000, key="monitor_auto")   # 30秒刷新一次
+        # 自动刷新（飞行中每2秒刷新一次）
+        if st.session_state.flight_started and st.session_state.sim and not st.session_state.sim.finished:
+            st_autorefresh(interval=2000, key="monitor_auto")
         else:
             st.info("✈️ 飞行任务已结束，页面已停止自动刷新。")
 
-        # 更新飞行状态
+        # 更新飞行状态（逐心跳推进）
         if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.sim and st.session_state.sim.running:
             steps = max(1, int(1.0 / HEARTBEAT_INTERVAL))
             for _ in range(steps):
@@ -726,7 +758,7 @@ def main():
             if idx == total_wp - 1:
                 msg = f"🎉 已到达终点（航点 {idx+1}/{total_wp}），飞行结束。"
             else:
-                msg = f"📍 已到达航点 {idx+1}/{total_wp}"
+                msg = f"📍 已到达航点 {idx+1}/{total_wp}，停留 {HOVER_SECONDS} 秒后继续..."
             st.session_state.last_arrival_msg = msg
             st.session_state.sim.arrival_flag = False
             st.rerun()
@@ -738,29 +770,66 @@ def main():
             if not st.session_state.last_arrival_msg:
                 st.session_state.last_arrival_msg = "飞行已到达终点。"
 
-        # 自动重飞：当飞行结束、循环飞行开启、且未被用户手动停止时
-        if (not st.session_state.flight_started and st.session_state.sim and st.session_state.sim.finished and
-            st.session_state.loop_flight and not st.session_state.user_stopped):
-            if st.session_state.waypoints and len(st.session_state.waypoints) >= 2:
-                st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
-                st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
-                st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
-                st.session_state.hb_list = [st.session_state.latest_hb] if st.session_state.latest_hb else []
-                st.session_state.flight_trail = [[st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]] if st.session_state.latest_hb else []
-                st.session_state.flight_started = True
-                st.session_state.flight_paused = False
-                st.session_state.last_arrival_msg = "🔄 自动重新开始飞行..."
-                st.session_state.user_stopped = False
-                st.session_state.sim.arrival_flag = False
-                st.rerun()
-            else:
-                st.warning("无法自动重飞：航点数据缺失，请返回航线规划页面重新设置。")
-                st.session_state.loop_flight = False
-
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始或已结束。请切换到「航线规划」页面，设置起点终点并点击「开始飞行」。")
         if st.session_state.last_arrival_msg:
             st.success(st.session_state.last_arrival_msg)
+
+        # 监控控制按钮区域
+        col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
+        with col_btn1:
+            if st.button("▶️ 开始任务", use_container_width=True):
+                if not st.session_state.flight_started or st.session_state.sim.finished:
+                    if st.session_state.waypoints:
+                        st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
+                        st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
+                        st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
+                        st.session_state.hb_list = [st.session_state.latest_hb] if st.session_state.latest_hb else []
+                        st.session_state.flight_trail = [[st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]] if st.session_state.latest_hb else []
+                        st.session_state.flight_started = True
+                        st.session_state.flight_paused = False
+                        st.session_state.last_arrival_msg = ""
+                        st.rerun()
+        with col_btn2:
+            if st.button("⏸️ 暂停", use_container_width=True):
+                st.session_state.flight_paused = True
+                st.rerun()
+        with col_btn3:
+            if st.button("⏹️ 停止", use_container_width=True):
+                st.session_state.flight_started = False
+                st.session_state.flight_paused = False
+                if st.session_state.sim:
+                    st.session_state.sim.running = False
+                st.rerun()
+        with col_btn4:
+            if st.button("🔄 重置", use_container_width=True):
+                if st.session_state.waypoints:
+                    st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
+                    st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
+                    st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
+                    st.session_state.hb_list = [st.session_state.latest_hb] if st.session_state.latest_hb else []
+                    st.session_state.flight_trail = [[st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]] if st.session_state.latest_hb else []
+                    st.session_state.flight_started = True
+                    st.session_state.flight_paused = False
+                    st.session_state.last_arrival_msg = ""
+                    st.rerun()
+                else:
+                    st.error("请先在航线规划页面设置路径")
+        with col_btn5:
+            # 新增的“刷新飞行”按钮：功能与重置相同（立即重新开始按航点飞行）
+            if st.button("🔄 刷新飞行", use_container_width=True, help="重新开始当前航线的飞行任务"):
+                if st.session_state.waypoints:
+                    st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
+                    st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
+                    st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
+                    st.session_state.hb_list = [st.session_state.latest_hb] if st.session_state.latest_hb else []
+                    st.session_state.flight_trail = [[st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]] if st.session_state.latest_hb else []
+                    st.session_state.flight_started = True
+                    st.session_state.flight_paused = False
+                    st.session_state.last_arrival_msg = ""
+                    st.rerun()
+                else:
+                    st.error("请先在航线规划页面设置路径")
 
         # 以下为监控面板展示（需要飞行数据）
         if st.session_state.latest_hb is None:
@@ -777,43 +846,6 @@ def main():
         elapsed = hb.flight_time
         remaining_dist = (1 - progress) * path_length(st.session_state.sim.waypoints) * 111000
         eta_sec = remaining_dist / speed if speed > 0 else 0
-
-        col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
-        with col_btn1:
-            if st.button("▶️ 开始任务", use_container_width=True):
-                if not st.session_state.flight_started or st.session_state.sim.finished:
-                    if st.session_state.waypoints:
-                        st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
-                        st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
-                        st.session_state.flight_started = True
-                        st.session_state.flight_paused = False
-                        st.session_state.last_arrival_msg = ""
-                        st.session_state.user_stopped = False
-                        st.rerun()
-        with col_btn2:
-            if st.button("⏸️ 暂停", use_container_width=True):
-                st.session_state.flight_paused = True
-                st.rerun()
-        with col_btn3:
-            if st.button("⏹️ 停止", use_container_width=True):
-                st.session_state.flight_started = False
-                st.session_state.flight_paused = False
-                if st.session_state.sim:
-                    st.session_state.sim.running = False
-                st.session_state.user_stopped = True
-                st.rerun()
-        with col_btn4:
-            if st.button("🔄 重置", use_container_width=True):
-                if st.session_state.waypoints:
-                    st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
-                    st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
-                    st.session_state.flight_started = True
-                    st.session_state.flight_paused = False
-                    st.session_state.last_arrival_msg = ""
-                    st.session_state.user_stopped = False
-                    st.rerun()
-                else:
-                    st.error("请先在航线规划页面设置路径")
 
         col_left, col_right = st.columns([1, 1.5])
         with col_left:
