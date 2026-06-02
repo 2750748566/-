@@ -313,7 +313,6 @@ class HeartbeatSim:
                 # 停留结束，继续前往下一航点
                 self.waiting_at_wp = False
                 self.hover_remaining = 0.0
-                # 注意：current_wp_idx 已经是下一个目标航点
                 # 如果已经是最后一个航点（即所有航点都已到达），则结束飞行
                 if self.current_wp_idx >= len(self.waypoints):
                     self.running = False
@@ -368,6 +367,24 @@ class HeartbeatSim:
         return self.history[-1] if self.history else None
 
 # ------------------------------------------------------------
+# 通信日志管理
+# ------------------------------------------------------------
+def add_comm_log(message, direction="OBC内部"):
+    """添加一条通信日志，自动添加时间戳"""
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    log_entry = {
+        "time": timestamp,
+        "direction": direction,
+        "message": message
+    }
+    if "comm_logs" not in st.session_state:
+        st.session_state.comm_logs = []
+    st.session_state.comm_logs.insert(0, log_entry)  # 最新在上
+    # 限制日志数量，保留最近50条
+    if len(st.session_state.comm_logs) > 50:
+        st.session_state.comm_logs = st.session_state.comm_logs[:50]
+
+# ------------------------------------------------------------
 # 地图创建
 # ------------------------------------------------------------
 def create_planning_map(center_gcj, points_gcj, obstacles, flight_trail, plan_path, drone_pos_gcj, flight_alt):
@@ -418,6 +435,7 @@ def init():
         'point_select_mode': 'A',
         'pending_click_point': None,
         'last_arrival_msg': "",
+        'comm_logs': [],   # 通信日志列表
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -425,6 +443,8 @@ def init():
 
 def update_plan_and_waypoints():
     if st.session_state.points_gcj.get('A') and st.session_state.points_gcj.get('B'):
+        # 记录开始航线规划日志
+        add_comm_log("开始航线规划 - 算法: A*", "OBC内部")
         path = create_avoidance_path(
             st.session_state.points_gcj['A'],
             st.session_state.points_gcj['B'],
@@ -436,6 +456,10 @@ def update_plan_and_waypoints():
         st.session_state.plan_path = path
         waypoints = generate_equidistant_waypoints(path, num_segments=6)
         st.session_state.waypoints = waypoints
+        # 记录完成日志
+        wp_count = len(waypoints) - 2 if waypoints else 0
+        total_len = path_length(path) * 111000  # 近似米
+        add_comm_log(f"航线规划完成 - 类型: horizontal, 航点数: {wp_count+2}, 路径长度: {total_len:.1f}m", "OBC内部")
     else:
         st.session_state.plan_path = None
         st.session_state.waypoints = None
@@ -674,6 +698,9 @@ def main():
                     a = st.session_state.points_gcj.get('A')
                     b = st.session_state.points_gcj.get('B')
                     if a and b and st.session_state.waypoints and len(st.session_state.waypoints) >= 2:
+                        # 添加日志：上传航线至OBC
+                        add_comm_log(f"上传航线: 起点 {a[1]:.6f},{a[0]:.6f} 终点 {b[1]:.6f},{b[0]:.6f} 高度 {st.session_state.flight_alt}m", "GCS → OBC")
+                        add_comm_log("航线接收确认 | Mode: AUTO", "FCU → OBC → GCS")
                         st.session_state.sim = HeartbeatSim(a.copy())
                         st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
                         st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
@@ -751,14 +778,16 @@ def main():
                 else:
                     break
 
-        # 检测到达新航点显示消息
+        # 检测到达新航点显示消息并写入日志
         if st.session_state.sim and st.session_state.sim.arrival_flag:
             idx = st.session_state.sim.arrived_wp_index
             total_wp = len(st.session_state.sim.waypoints)
             if idx == total_wp - 1:
                 msg = f"🎉 已到达终点（航点 {idx+1}/{total_wp}），飞行结束。"
+                add_comm_log(f"MISSION_COMPLETE (航点 {idx+1}/{total_wp})", "FCU → OBC → GCS")
             else:
                 msg = f"📍 已到达航点 {idx+1}/{total_wp}，停留 {HOVER_SECONDS} 秒后继续..."
+                add_comm_log(f"WP_REACHED #{idx+1}", "FCU → OBC → GCS")
             st.session_state.last_arrival_msg = msg
             st.session_state.sim.arrival_flag = False
             st.rerun()
@@ -769,6 +798,7 @@ def main():
             st.session_state.flight_paused = False
             if not st.session_state.last_arrival_msg:
                 st.session_state.last_arrival_msg = "飞行已到达终点。"
+                add_comm_log("MISSION_COMPLETE", "FCU → OBC → GCS")
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始或已结束。请切换到「航线规划」页面，设置起点终点并点击「开始飞行」。")
@@ -781,6 +811,7 @@ def main():
             if st.button("▶️ 开始任务", use_container_width=True):
                 if not st.session_state.flight_started or st.session_state.sim.finished:
                     if st.session_state.waypoints:
+                        add_comm_log("重新开始任务", "GCS → OBC")
                         st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
                         st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
                         st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
@@ -804,6 +835,7 @@ def main():
         with col_btn4:
             if st.button("🔄 重置", use_container_width=True):
                 if st.session_state.waypoints:
+                    add_comm_log("重置飞行任务", "GCS → OBC")
                     st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
                     st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
                     st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
@@ -816,9 +848,10 @@ def main():
                 else:
                     st.error("请先在航线规划页面设置路径")
         with col_btn5:
-            # 新增的“刷新飞行”按钮：功能与重置相同（立即重新开始按航点飞行）
+            # 刷新飞行按钮
             if st.button("🔄 刷新飞行", use_container_width=True, help="重新开始当前航线的飞行任务"):
                 if st.session_state.waypoints:
+                    add_comm_log("手动刷新飞行", "GCS → OBC")
                     st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
                     st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
                     st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
@@ -847,6 +880,7 @@ def main():
         remaining_dist = (1 - progress) * path_length(st.session_state.sim.waypoints) * 111000
         eta_sec = remaining_dist / speed if speed > 0 else 0
 
+        # 左侧：任务状态 + 通信拓扑
         col_left, col_right = st.columns([1, 1.5])
         with col_left:
             st.markdown("### 📊 任务状态")
@@ -861,22 +895,42 @@ def main():
             eta_sec_int = int(eta_sec % 60)
             st.metric("预计到达", f"{eta_min:02d}:{eta_sec_int:02d}")
             st.metric("电量模拟", "40%")
+            
             st.markdown("---")
             st.markdown("### 📡 通信链路拓扑与数据流")
+            
+            # 拓扑结构图（使用自定义HTML/列布局）
+            col_gcs, col_obc, col_fcu = st.columns(3)
+            with col_gcs:
+                st.markdown("**GCS (地面站)**")
+                st.caption("192.168.1.100")
+                st.markdown("✅ 已连接")
+            with col_obc:
+                st.markdown("**OBC (机载计算机)**")
+                st.caption("Raspberry Pi 4")
+                st.markdown("✅ 已连接")
+            with col_fcu:
+                st.markdown("**FCU (飞控)**")
+                st.caption("PX4 / ArduPilot")
+                st.markdown("✅ 已连接")
+            
+            # 连接箭头示意
+            st.markdown("```\nGCS --UDP:14550--> OBC --MAVLink--> FCU\n```")
+            
+            # 链路统计
             if progress < 1:
                 delay = random.uniform(20, 35)
                 loss = random.uniform(0, 0.5)
             else:
                 delay = 10
                 loss = 0
-            st.markdown("- **GCS**: 在线")
-            st.markdown("- **OBC**: 在线")
-            st.markdown("- **FCU**: 在线")
-            st.markdown("#### 链路统计:")
-            st.markdown(f"- GCS↔OBC: 正常")
-            st.markdown(f"- OBC↔FCU: 正常")
-            st.markdown(f"- 延迟: ~{delay:.0f}ms")
-            st.markdown(f"- 丢包率: {loss:.1f}%")
+            st.markdown("#### 链路统计")
+            st.markdown(f"- **GCS ↔ OBC**: 正常")
+            st.markdown(f"- **OBC ↔ FCU**: 正常")
+            st.markdown(f"- **延迟**: ~{delay:.0f}ms")
+            st.markdown(f"- **丢包率**: {loss:.1f}%")
+        
+        # 右侧：实时地图
         with col_right:
             st.subheader("🗺️ 实时飞行地图")
             center = [st.session_state.sim.current_pos[0], st.session_state.sim.current_pos[1]]
@@ -901,6 +955,17 @@ def main():
                 folium.PolyLine([[lat,lng] for lng,lat in st.session_state.flight_trail[-100:]], color='orange', weight=2).add_to(m)
             folium.Marker([center[1], center[0]], icon=folium.Icon(color='blue')).add_to(m)
             folium_static(m, width=700, height=500)
+
+        st.markdown("---")
+        
+        # 通信日志区域
+        st.subheader("📋 通信日志")
+        if st.session_state.comm_logs:
+            # 倒序显示（最新的在上方）
+            for log in st.session_state.comm_logs[:20]:  # 最多显示20条
+                st.caption(f"[{log['time']}] {log['direction']}: {log['message']}")
+        else:
+            st.info("暂无通信日志")
 
         st.markdown("---")
         st.subheader("💓 心跳序号 vs 飞行时间 (正比例关系)")
