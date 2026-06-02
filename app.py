@@ -372,7 +372,6 @@ def init():
         'point_select_mode': 'A',
         'pending_click_point': None,
         'last_arrival_msg': "",
-        # [新增] 循环飞行开关和手动停止标志
         'loop_flight': False,
         'user_stopped': False,
     }
@@ -639,7 +638,7 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.user_stopped = False   # [新增] 清除手动停止标志
+                        st.session_state.user_stopped = False
                         st.success("飞行已开始，切换至「飞行监控」查看动态")
                         st.rerun()
                     else:
@@ -649,7 +648,7 @@ def main():
                     st.session_state.flight_started = False
                     if st.session_state.sim:
                         st.session_state.sim.running = False
-                    st.session_state.user_stopped = True   # [新增] 标记用户主动停止，阻止自动重飞
+                    st.session_state.user_stopped = True
                     st.info("飞行已停止")
                     st.rerun()
             if st.session_state.plan_path:
@@ -688,7 +687,7 @@ def main():
     else:
         st.header("📡 飞行实时画面 - 任务执行监控")
 
-        # [新增] 循环飞行开关
+        # 循环飞行开关
         loop_flight = st.checkbox("🔄 循环飞行（结束后自动重飞）", value=st.session_state.loop_flight,
                                   help="飞行到达终点后自动重新开始，无需手动操作")
         if loop_flight != st.session_state.loop_flight:
@@ -696,10 +695,11 @@ def main():
             st.rerun()
 
         # 自动刷新逻辑：飞行中 或 (循环飞行开启且飞行已结束) 时刷新页面
+        # 修改刷新间隔为 30 秒，与航点推进频率（约半分钟一个航点）保持一致
         need_autorefresh = (st.session_state.flight_started and st.session_state.sim and not st.session_state.sim.finished) or \
                            (st.session_state.loop_flight and st.session_state.sim and st.session_state.sim.finished)
         if need_autorefresh:
-            st_autorefresh(interval=3000, key="monitor_auto")
+            st_autorefresh(interval=30000, key="monitor_auto")   # 30秒刷新一次
         else:
             st.info("✈️ 飞行任务已结束，页面已停止自动刷新。")
 
@@ -738,12 +738,10 @@ def main():
             if not st.session_state.last_arrival_msg:
                 st.session_state.last_arrival_msg = "飞行已到达终点。"
 
-        # [新增] 自动重飞：当飞行结束、循环飞行开启、且未被用户手动停止时
+        # 自动重飞：当飞行结束、循环飞行开启、且未被用户手动停止时
         if (not st.session_state.flight_started and st.session_state.sim and st.session_state.sim.finished and
             st.session_state.loop_flight and not st.session_state.user_stopped):
-            # 确保有航点数据
             if st.session_state.waypoints and len(st.session_state.waypoints) >= 2:
-                # 重置并开始新飞行
                 st.session_state.sim = HeartbeatSim(st.session_state.points_gcj['A'].copy())
                 st.session_state.sim.set_path(st.session_state.waypoints, st.session_state.flight_alt, st.session_state.drone_speed)
                 st.session_state.latest_hb = st.session_state.sim.history[-1] if st.session_state.sim.history else None
@@ -752,13 +750,12 @@ def main():
                 st.session_state.flight_started = True
                 st.session_state.flight_paused = False
                 st.session_state.last_arrival_msg = "🔄 自动重新开始飞行..."
-                st.session_state.user_stopped = False   # 清除停止标志
-                # 确保到达标志重置
+                st.session_state.user_stopped = False
                 st.session_state.sim.arrival_flag = False
                 st.rerun()
             else:
                 st.warning("无法自动重飞：航点数据缺失，请返回航线规划页面重新设置。")
-                st.session_state.loop_flight = False   # 自动关闭循环，避免持续警告
+                st.session_state.loop_flight = False
 
         if not st.session_state.flight_started:
             st.info("⏳ 飞行未开始或已结束。请切换到「航线规划」页面，设置起点终点并点击「开始飞行」。")
@@ -791,7 +788,7 @@ def main():
                         st.session_state.flight_started = True
                         st.session_state.flight_paused = False
                         st.session_state.last_arrival_msg = ""
-                        st.session_state.user_stopped = False   # [新增]
+                        st.session_state.user_stopped = False
                         st.rerun()
         with col_btn2:
             if st.button("⏸️ 暂停", use_container_width=True):
@@ -803,7 +800,7 @@ def main():
                 st.session_state.flight_paused = False
                 if st.session_state.sim:
                     st.session_state.sim.running = False
-                st.session_state.user_stopped = True   # [新增]
+                st.session_state.user_stopped = True
                 st.rerun()
         with col_btn4:
             if st.button("🔄 重置", use_container_width=True):
@@ -813,7 +810,7 @@ def main():
                     st.session_state.flight_started = True
                     st.session_state.flight_paused = False
                     st.session_state.last_arrival_msg = ""
-                    st.session_state.user_stopped = False   # [新增]
+                    st.session_state.user_stopped = False
                     st.rerun()
                 else:
                     st.error("请先在航线规划页面设置路径")
