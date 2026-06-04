@@ -10,7 +10,6 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
-from coord_convert.transform import wgs2gcj, gcj2wgs
 from folium.plugins import Draw
 
 # ------------------------------------------------------------
@@ -24,22 +23,77 @@ HOVER_SECONDS = 5
 CONFIG_FILE = "obstacle_config.json"
 
 # ------------------------------------------------------------
-# 坐标转换函数（精确版）
+# 坐标转换函数（纯 Python 实现，无第三方依赖）
+# 基于 https://github.com/googollee/eviltransform 移植
 # ------------------------------------------------------------
+def out_of_china(lng, lat):
+    """判断坐标是否在中国境外，境外不进行偏移"""
+    return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
+
+def transform_lat(lng, lat):
+    ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + \
+          0.1 * lng * lat + 0.2 * math.sqrt(abs(lng))
+    ret += (20.0 * math.sin(6.0 * lng * math.pi) + 20.0 *
+            math.sin(2.0 * lng * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(lat * math.pi) + 40.0 *
+            math.sin(lat / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (160.0 * math.sin(lat / 12.0 * math.pi) + 320 *
+            math.sin(lat * math.pi / 30.0)) * 2.0 / 3.0
+    return ret
+
+def transform_lng(lng, lat):
+    ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + \
+          0.1 * lng * lat + 0.1 * math.sqrt(abs(lng))
+    ret += (20.0 * math.sin(6.0 * lng * math.pi) + 20.0 *
+            math.sin(2.0 * lng * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(lng * math.pi) + 40.0 *
+            math.sin(lng / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (150.0 * math.sin(lng / 12.0 * math.pi) + 300.0 *
+            math.sin(lng * math.pi / 30.0)) * 2.0 / 3.0
+    return ret
+
 def wgs84_to_gcj02(lng, lat):
-    return wgs2gcj(lng, lat)
+    """WGS-84 转 GCJ-02"""
+    if out_of_china(lng, lat):
+        return [lng, lat]
+    a = 6378245.0
+    ee = 0.00669342162296594323
+    dlat = transform_lat(lng - 105.0, lat - 35.0)
+    dlng = transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * math.pi
+    magic = math.sin(radlat)
+    magic = 1 - ee * magic * magic
+    sqrtmagic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * math.pi)
+    dlng = (dlng * 180.0) / (a / sqrtmagic * math.cos(radlat) * math.pi)
+    return [lng + dlng, lat + dlat]
 
 def gcj02_to_wgs84(lng, lat):
-    return gcj2wgs(lng, lat)
+    """GCJ-02 转 WGS-84"""
+    if out_of_china(lng, lat):
+        return [lng, lat]
+    a = 6378245.0
+    ee = 0.00669342162296594323
+    dlat = transform_lat(lng - 105.0, lat - 35.0)
+    dlng = transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * math.pi
+    magic = math.sin(radlat)
+    magic = 1 - ee * magic * magic
+    sqrtmagic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * math.pi)
+    dlng = (dlng * 180.0) / (a / sqrtmagic * math.cos(radlat) * math.pi)
+    mglat = lat + dlat
+    mglng = lng + dlng
+    return [lng * 2 - mglng, lat * 2 - mglat]
 
 def transform_to_gcj02(lng, lat, from_coord):
+    """统一转换接口：将给定的坐标转换为GCJ-02"""
     if from_coord == "WGS-84":
         return wgs84_to_gcj02(lng, lat)
     return lng, lat
 
 def transform_to_display(lng, lat, to_coord):
-    if to_coord == "WGS-84":
-        return gcj02_to_wgs84(lng, lat)
+    """显示时的转换（本项目所有显示均使用GCJ-02，故直接返回）"""
     return lng, lat
 
 # ------------------------------------------------------------
@@ -66,7 +120,8 @@ def save_obstacles(obstacles):
         'obstacles': obstacles,
         'count': len(obstacles),
         'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'version': 'v13.3_GCJ02_default'
+        'version': 'v15.0_pure_python_gcj02',
+        'coord_sys': 'GCJ-02'
     }
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -510,7 +565,7 @@ def main():
         st.session_state.page = selected_page
         st.markdown("---")
         st.subheader("🗺️ 坐标系设置")
-        # 修改：默认索引为 1（GCJ-02），使默认坐标系为 GCJ-02
+        # 默认索引为 1（GCJ-02），使默认坐标系为 GCJ-02
         coord_choice = st.radio("输入坐标系", ["WGS-84", "GCJ-02(高德/百度)"],
                                 index=1 if st.session_state.coord_sys == "GCJ-02" else 0)
         st.session_state.coord_sys = "WGS-84" if coord_choice == "WGS-84" else "GCJ-02"
@@ -523,8 +578,8 @@ def main():
     # ==================== 障碍物管理页面 ====================
     if st.session_state.page == "障碍物管理":
         st.header("🚧 障碍物配置持久化")
-        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v13.3_GCJ02_default")
-        st.info("📂 文件保存在程序同目录下，绝对路径如上所示")
+        st.caption(f"配置文件: {os.path.abspath(CONFIG_FILE)} | 版本: v15.0_pure_python_gcj02")
+        st.info("📂 所有障碍物坐标均以 GCJ-02 存储，与高德底图完全对齐。")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -623,11 +678,11 @@ def main():
     # ==================== 航线规划页面 ====================
     elif st.session_state.page == "航线规划":
         st.header("🗺️ 航线规划 - 点击地图 + 方向微调 + 手动输入坐标 + 多边形圈选障碍物")
+        st.info("🔧 **坐标修正说明**：绘制多边形时，系统会自动将 WGS-84 坐标转换为 GCJ-02 存储，确保与高德底图完全对齐，圈选不再偏移。")
 
         col_map, col_panel = st.columns([3, 1.2])
         with col_panel:
             st.markdown("### 🎮 控制面板")
-            # 新增：启用绘制多边形的按钮
             if not st.session_state.flight_started:
                 draw_enabled = st.checkbox("✏️ 启用多边形绘制（圈选障碍物）", value=st.session_state.draw_enabled)
                 if draw_enabled != st.session_state.draw_enabled:
@@ -721,7 +776,7 @@ def main():
                 update_plan_and_waypoints()
                 st.rerun()
             st.markdown("---")
-            st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置\n- 点击方向按钮 → 每次移动约 1 米（精确调整）\n- 也可以手动输入坐标快速定位\n- **勾选「启用多边形绘制」后，在地图上绘制多边形 → 自动弹出添加表单**")
+            st.info("💡 **操作提示**：\n- 上方选择要移动的点（A/B）\n- **单击地图** → 点跳转到点击位置（自动转GCJ-02）\n- 点击方向按钮 → 每次移动约 1 米\n- **勾选「启用多边形绘制」后，在地图上绘制多边形 → 自动弹出添加表单**")
 
             st.subheader("✈️ 飞行参数")
             new_alt = st.slider("飞行高度 (m)", 10, 200, st.session_state.flight_alt, 5)
@@ -790,7 +845,6 @@ def main():
             if st.session_state.flight_started and not st.session_state.flight_paused and st.session_state.latest_hb:
                 drone_pos_gcj = [st.session_state.latest_hb.lng, st.session_state.latest_hb.lat]
 
-            # 创建地图时根据勾选状态决定是否启用绘图工具
             folium_map = create_planning_map(
                 SCHOOL_CENTER_GCJ, st.session_state.points_gcj,
                 st.session_state.obstacles, st.session_state.flight_trail,
@@ -813,7 +867,6 @@ def main():
                     # 保存到临时变量，并显示添加对话框
                     st.session_state.drawn_polygon = vertices_gcj
                     st.session_state.show_add_dialog = True
-                    # 清除绘图，避免重复触发（通过 rerun 后重新创建地图，绘图将会消失）
                     st.rerun()
 
             # 显示添加障碍物的对话框
@@ -835,10 +888,9 @@ def main():
                             save_obstacles(st.session_state.obstacles)
                             update_plan_and_waypoints()
                             add_comm_log(f"通过地图绘制添加障碍物「{obs_name}」", "GCS")
-                            # 关闭对话框，清除绘制临时数据，并禁用绘制模式（可选）
                             st.session_state.show_add_dialog = False
                             st.session_state.drawn_polygon = None
-                            st.session_state.draw_enabled = False  # 添加完成后自动关闭绘制模式
+                            st.session_state.draw_enabled = False
                             st.success("障碍物已添加，航线已重新规划")
                             st.rerun()
                     with col_cancel:
